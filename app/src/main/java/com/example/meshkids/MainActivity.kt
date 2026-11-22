@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColor
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -101,6 +103,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     val connectionState by bleManager.connectionState.collectAsState()
     val allContacts by bleManager.contacts.collectAsState()
     val allChannels by bleManager.channels.collectAsState()
+    val unreadTargetIds by bleManager.unreadTargetIds.collectAsState()
 
     val allowedTargets = remember(allContacts, allChannels) {
         val channelTargets = allChannels.filter { it.isAllowedForKid }.map {
@@ -127,6 +130,10 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     var selectedTargetId by remember { mutableStateOf<String?>(null) }
     val selectedTarget = remember(selectedTargetId, allowedTargets) {
         allowedTargets.firstOrNull { it.id == selectedTargetId }
+    }
+
+    LaunchedEffect(selectedTargetId) {
+        selectedTargetId?.let { bleManager.markTargetRead(it) }
     }
 
     var showPinDialog by remember { mutableStateOf(false) }
@@ -195,7 +202,11 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                 KidTargetListScreen(
                     targets = allowedTargets,
                     messages = messages,
-                    onSelectTarget = { selectedTargetId = it.id }
+                    unreadTargetIds = unreadTargetIds,
+                    onSelectTarget = {
+                        bleManager.markTargetRead(it.id)
+                        selectedTargetId = it.id
+                    }
                 )
             } else {
                 KidChatScreen(
@@ -213,8 +224,20 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
 fun KidTargetListScreen(
     targets: List<ChatTarget>,
     messages: List<ChatMessage>,
+    unreadTargetIds: Set<String>,
     onSelectTarget: (ChatTarget) -> Unit
 ) {
+    val infiniteTransition = rememberInfiniteTransition(label = "unreadBlink")
+    val blinkCardColor by infiniteTransition.animateColor(
+        initialValue = Color.White,
+        targetValue = Color(0xFFFFF59D),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 650, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "blinkCardColor"
+    )
+
     if (targets.isEmpty()) {
         Column(
             modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -243,11 +266,14 @@ fun KidTargetListScreen(
             items(targets) { target ->
                 val lastMsg = messages.lastOrNull { it.targetId == target.id }
                 val isGroup = target.type == ChatTargetType.CHANNEL
+                val isUnread = unreadTargetIds.contains(target.id)
+                val containerColor = if (isUnread) blinkCardColor else Color.White
+
                 Card(
                     modifier = Modifier.fillMaxWidth().clickable { onSelectTarget(target) },
                     shape = RoundedCornerShape(20.dp),
-                    elevation = CardDefaults.cardElevation(4.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                    elevation = CardDefaults.cardElevation(if (isUnread) 8.dp else 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = containerColor)
                 ) {
                     Row(
                         modifier = Modifier.padding(20.dp),
@@ -269,11 +295,29 @@ fun KidTargetListScreen(
                         }
                         Spacer(modifier = Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(text = target.title, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(text = target.title, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                if (isUnread) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        color = Color(0xFFD32F2F),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "NEU",
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
                             Text(
                                 text = lastMsg?.text ?: if (isGroup) "Familien-Gruppenchat" else "Tippe hier zum Schreiben!",
                                 fontSize = 15.sp,
-                                color = Color.Gray,
+                                fontWeight = if (isUnread) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isUnread) Color.Black else Color.Gray,
                                 maxLines = 1
                             )
                         }
@@ -335,6 +379,15 @@ fun KidChatScreen(
                     horizontalArrangement = if (msg.isFromMe) Arrangement.End else Arrangement.Start
                 ) {
                     Column(horizontalAlignment = if (msg.isFromMe) Alignment.End else Alignment.Start) {
+                        if (!msg.isFromMe && target.type == ChatTargetType.CHANNEL && !msg.senderName.isNullOrBlank()) {
+                            Text(
+                                text = msg.senderName,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1565C0),
+                                modifier = Modifier.padding(start = 6.dp, bottom = 2.dp)
+                            )
+                        }
                         Surface(
                             shape = RoundedCornerShape(18.dp),
                             color = bubbleColor,
