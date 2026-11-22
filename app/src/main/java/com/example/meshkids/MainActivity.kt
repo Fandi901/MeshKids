@@ -299,6 +299,10 @@ fun KidChatScreen(
         "Kannst du mich abholen?"
     )
 
+    val blueGroupColor = Color(0xFF1E88E5)
+    val greenDeliveredColor = Color(0xFF2E7D32)
+    val redPendingOrFailedColor = Color(0xFFD32F2F)
+
     Column(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
@@ -306,16 +310,24 @@ fun KidChatScreen(
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
             items(messages) { msg ->
+                val isGroupMsg = target.type == ChatTargetType.CHANNEL || msg.deliveryStatus == DeliveryStatus.GROUP_SENT
                 val bubbleColor = when {
                     !msg.isFromMe -> Color.White
-                    msg.deliveryStatus == DeliveryStatus.DELIVERED -> Color(0xFF2E7D32)
-                    else -> Color(0xFFD32F2F)
+                    isGroupMsg -> blueGroupColor
+                    msg.deliveryStatus == DeliveryStatus.DELIVERED -> greenDeliveredColor
+                    else -> redPendingOrFailedColor
                 }
                 val textColor = if (msg.isFromMe) Color.White else Color.Black
-                val statusLabel = when (msg.deliveryStatus) {
-                    DeliveryStatus.SENDING -> "Wird gesendet (bis zu 3 Min.)..."
-                    DeliveryStatus.DELIVERED -> "Angekommen"
-                    DeliveryStatus.FAILED -> "Nicht angekommen"
+                val statusLabel = when {
+                    isGroupMsg -> "Gesendet (Gruppe)"
+                    msg.deliveryStatus == DeliveryStatus.DELIVERED -> "Zugestellt"
+                    msg.deliveryStatus == DeliveryStatus.FAILED -> "Keine Zustellbestaetigung"
+                    else -> "Warte auf Zustellbestaetigung..."
+                }
+                val statusColor = when {
+                    isGroupMsg -> blueGroupColor
+                    msg.deliveryStatus == DeliveryStatus.DELIVERED -> greenDeliveredColor
+                    else -> redPendingOrFailedColor
                 }
 
                 Row(
@@ -340,7 +352,7 @@ fun KidChatScreen(
                                 text = statusLabel,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = if (msg.deliveryStatus == DeliveryStatus.DELIVERED) Color(0xFF2E7D32) else Color(0xFFD32F2F),
+                                color = statusColor,
                                 modifier = Modifier.padding(top = 2.dp, start = 4.dp, end = 4.dp)
                             )
                         }
@@ -447,7 +459,6 @@ fun ParentSettingsScreen(
     val contacts by bleManager.contacts.collectAsState()
     val channels by bleManager.channels.collectAsState()
     val connectionState by bleManager.connectionState.collectAsState()
-    val radioConfig by bleManager.radioConfig.collectAsState()
 
     var kidName by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
@@ -456,11 +467,6 @@ fun ParentSettingsScreen(
     var channelNameInput by remember { mutableStateOf("Familie") }
     var channelAliasInput by remember { mutableStateOf("Familie") }
     var channelPskInput by remember { mutableStateOf("") }
-
-    var freqKhzInput by remember { mutableStateOf(radioConfig.freqKhz.toString()) }
-    var bwKhzInput by remember { mutableStateOf(radioConfig.bwKhz.toString()) }
-    var sfInput by remember { mutableStateOf(radioConfig.sf.toString()) }
-    var crInput by remember { mutableStateOf(radioConfig.cr.toString()) }
 
     var infoBanner by remember { mutableStateOf<String?>(null) }
 
@@ -525,77 +531,7 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("2. Mesh-Funk-Region (EU Narrow 868 MHz)", fontWeight = FontWeight.Bold)
-                Text("Aktiv: ${radioConfig.presetLabel} | ${radioConfig.freqKhz} kHz, BW ${radioConfig.bwKhz} kHz, SF${radioConfig.sf}, CR${radioConfig.cr}", fontSize = 13.sp, color = Color.Gray)
-                Spacer(modifier = Modifier.height(8.dp))
-                Button(onClick = {
-                    val euNarrow = RadioConfig(
-                        presetLabel = "EU Narrow (868 MHz)",
-                        freqKhz = 869618,
-                        bwKhz = 62,
-                        sf = 8,
-                        cr = 8
-                    )
-                    freqKhzInput = euNarrow.freqKhz.toString()
-                    bwKhzInput = euNarrow.bwKhz.toString()
-                    sfInput = euNarrow.sf.toString()
-                    crInput = euNarrow.cr.toString()
-                    bleManager.applyRadioConfig(euNarrow)
-                    infoBanner = "EU Narrow (869.618 MHz, BW 62 kHz, SF8, CR8) gesetzt."
-                }) {
-                    Text("EU Narrow (868 MHz) anwenden")
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = freqKhzInput,
-                        onValueChange = { freqKhzInput = it.filter { c -> c.isDigit() } },
-                        modifier = Modifier.weight(1f),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        label = { Text("Freq (kHz)") }
-                    )
-                    OutlinedTextField(
-                        value = bwKhzInput,
-                        onValueChange = { bwKhzInput = it.filter { c -> c.isDigit() } },
-                        modifier = Modifier.width(96.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        label = { Text("BW") }
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = sfInput,
-                        onValueChange = { sfInput = it.filter { c -> c.isDigit() } },
-                        modifier = Modifier.width(76.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        label = { Text("SF") }
-                    )
-                    OutlinedTextField(
-                        value = crInput,
-                        onValueChange = { crInput = it.filter { c -> c.isDigit() } },
-                        modifier = Modifier.width(76.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        label = { Text("CR") }
-                    )
-                    Spacer(modifier = Modifier.weight(1f))
-                    OutlinedButton(onClick = {
-                        val f = freqKhzInput.toIntOrNull() ?: 869618
-                        val b = bwKhzInput.toIntOrNull() ?: 62
-                        val s = sfInput.toIntOrNull() ?: 8
-                        val c = crInput.toIntOrNull() ?: 8
-                        bleManager.applyRadioConfig(RadioConfig("Benutzerdefiniert (868 MHz)", f, b, s, c))
-                        infoBanner = "Funkwerte ($f kHz) an Funkgeraet gesendet."
-                    }) {
-                        Text("Uebernehmen")
-                    }
-                }
-            }
-
-            item {
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("3. Kontakte & Alias-Namen (z. B. Mama, Papa)", fontWeight = FontWeight.Bold)
+                Text("2. Kontakte & Alias-Namen (z. B. Mama, Papa)", fontWeight = FontWeight.Bold)
                 OutlinedButton(onClick = { bleManager.syncContacts() }) {
                     Text("Kontakte vom Funkgeraet laden")
                 }
@@ -642,7 +578,7 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("4. Gruppenchat / Kanal & PSK einrichten (ohne MeshCore-App)", fontWeight = FontWeight.Bold)
+                Text("3. Gruppenchat / Kanal & PSK einrichten (ohne MeshCore-App)", fontWeight = FontWeight.Bold)
                 Text("Gleicher Kanal-Index, Name und Schluessel (PSK) auf allen Familiengeraeten verhindert Zeichensalat.", fontSize = 13.sp, color = Color.Gray)
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -723,7 +659,7 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("5. Anzeigename des Kindes im Mesh", fontWeight = FontWeight.Bold)
+                Text("4. Anzeigename des Kindes im Mesh", fontWeight = FontWeight.Bold)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = kidName,
@@ -747,7 +683,7 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("6. Eltern-PIN aendern", fontWeight = FontWeight.Bold)
+                Text("5. Eltern-PIN aendern", fontWeight = FontWeight.Bold)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = newPin,

@@ -6,7 +6,11 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,7 +24,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
 enum class DeliveryStatus {
     SENDING,
     DELIVERED,
-    FAILED
+    FAILED,
+    GROUP_SENT
 }
 
 data class MeshContact(
@@ -68,20 +73,12 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis()
 )
 
-data class RadioConfig(
-    val presetLabel: String = "EU Narrow (868 MHz)",
-    val freqKhz: Int = 869618,
-    val bwKhz: Int = 62,
-    val sf: Int = 8,
-    val cr: Int = 8
-)
-
 @SuppressLint("MissingPermission")
 class MeshCoreBleManager(private val context: Context) {
 
     companion object {
         const val DIRECT_MSG_TIMEOUT_MS: Long = 180_000L
-        const val RECONNECT_INTERVAL_MS: Long = 4_000L
+        const val RECONNECT_INTERVAL_MS: Long = 3_000L
 
         val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
         val RX_CHAR_UUID: UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -93,15 +90,12 @@ class MeshCoreBleManager(private val context: Context) {
         const val CMD_SEND_CHANNEL_TXT_MSG: Byte = 0x03
         const val CMD_GET_CONTACTS: Byte = 0x04
         const val CMD_SET_DEVICE_TIME: Byte = 0x06
+        const val CMD_SEND_SELF_ADVERT: Byte = 0x07
         const val CMD_SET_ADVERT_NAME: Byte = 0x08
         const val CMD_SYNC_NEXT_MESSAGE: Byte = 0x0A
-        const val CMD_SET_RADIO_PARAMS: Byte = 0x0B
-        const val CMD_SEND_SELF_ADVERT: Byte = 0x07
         const val CMD_GET_CHANNEL: Byte = 0x1F
         const val CMD_SET_CHANNEL: Byte = 0x20
 
-        const val RESP_OK: Byte = 0x00
-        const val RESP_ERR: Byte = 0x01
         const val RESP_CONTACT: Byte = 0x03
         const val RESP_SENT: Byte = 0x06
         const val RESP_CONTACT_MSG_RECV: Byte = 0x07
@@ -122,6 +116,7 @@ class MeshCoreBleManager(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var reconnectJob: Job? = null
     private var manualDisconnect = false
+    private var isConnecting = false
 
     private val commandQueue = ConcurrentLinkedQueue<ByteArray>()
     private var isWriting = false
@@ -146,17 +141,29 @@ class MeshCoreBleManager(private val context: Context) {
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages
 
-    private val _radioConfig = MutableStateFlow(loadSavedRadioConfig())
-    val radioConfig: StateFlow<RadioConfig> = _radioConfig
+    private val btStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                if (state == BluetoothAdapter.STATE_ON && !manualDisconnect) {
+                    scheduleReconnect(immediate = true)
+                } else if (state == BluetoothAdapter.STATE_OFF) {
+                    _isConnected.value = false
+                    isConnecting = false
+                    _connectionState.value = "Bluetooth aus – warte..."
+                }
+            }
+        }
+    }
 
-    private fun loadSavedRadioConfig(): RadioConfig {
-        return RadioConfig(
-            presetLabel = prefs.getString("radio_preset", "EU Narrow (868 MHz)") ?: "EU Narrow (868 MHz)",
-            freqKhz = prefs.getInt("radio_freq_khz", 869618),
-            bwKhz = prefs.getInt("radio_bw_khz", 62),
-            sf = prefs.getInt("radio_sf", 8),
-            cr = prefs.getInt("radio_cr", 8)
-        )
+    init {
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(btStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(btStateReceiver, filter)
+        }
+        startReconnectWatchdog()
     }
 
     private fun loadInitialChannels(): List<MeshChannel> {
@@ -177,35 +184,70 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun autoConnectIfSaved() {
-        if (_isConnected.value) return
-        val savedAddress = prefs.getString("saved_mac", null) ?: return
-        manualDisconnect = false
-        val device = bluetoothAdapter?.getRemoteDevice(savedAddress) ?: return
-        connectToDevice(device, fromAutoReconnect = true)
-    }
-
-    private fun startAutoReconnectLoop() {
         if (manualDisconnect) return
         val savedAddress = prefs.getString("saved_mac", null) ?: return
-        if (reconnectJob?.isActive == true) return
+        if (_isConnected.value && bluetoothGatt != null) return
+        scheduleReconnect(immediate = true)
+    }
 
+    fun scheduleReconnect(immediate: Boolean = false) {
+        if (manualDisconnect) return
+        if (prefs.getString("saved_mac", null) == null) return
+        if (immediate && !_isConnected.value && !isConnecting) {
+            scope.launch { attemptReconnectOnce() }
+        }
+        startReconnectWatchdog()
+    }
+
+    private fun startReconnectWatchdog() {
+        if (reconnectJob?.isActive == true) return
         reconnectJob = scope.launch {
-            while (isActive && !manualDisconnect && !_isConnected.value) {
+            while (isActive) {
                 delay(RECONNECT_INTERVAL_MS)
-                if (_isConnected.value || manualDisconnect) break
-                val adapter = bluetoothAdapter
-                if (adapter != null && adapter.isEnabled) {
-                    _connectionState.value = "Verbinde automatisch neu..."
-                    val device = adapter.getRemoteDevice(savedAddress)
-                    withContext(Dispatchers.Main) {
-                        bluetoothGatt?.close()
-                        bluetoothGatt = null
-                        rxCharacteristic = null
-                        isWriting = false
-                        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-                    }
+                if (manualDisconnect) continue
+                val savedAddress = prefs.getString("saved_mac", null) ?: continue
+                if (!_isConnected.value && !isConnecting) {
+                    attemptReconnectOnce(savedAddress)
                 }
             }
+        }
+    }
+
+    private suspend fun attemptReconnectOnce(addressOverride: String? = null) {
+        if (manualDisconnect || _isConnected.value || isConnecting) return
+        val savedAddress = addressOverride ?: prefs.getString("saved_mac", null) ?: return
+        val adapter = bluetoothAdapter ?: return
+        if (!adapter.isEnabled) {
+            _connectionState.value = "Bluetooth aus – warte..."
+            return
+        }
+
+        isConnecting = true
+        _connectionState.value = "Verbinde automatisch neu..."
+        try {
+            val device = adapter.getRemoteDevice(savedAddress)
+            withContext(Dispatchers.Main) {
+                try {
+                    bluetoothGatt?.disconnect()
+                    bluetoothGatt?.close()
+                } catch (_: Exception) {
+                }
+                bluetoothGatt = null
+                rxCharacteristic = null
+                isWriting = false
+                bluetoothGatt = device.connectGatt(
+                    context,
+                    false,
+                    gattCallback,
+                    BluetoothDevice.TRANSPORT_LE
+                )
+            }
+            delay(6_000L)
+            if (!_isConnected.value) {
+                isConnecting = false
+            }
+        } catch (_: Exception) {
+            isConnecting = false
         }
     }
 
@@ -237,34 +279,55 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    fun connectToDevice(device: BluetoothDevice, fromAutoReconnect: Boolean = false) {
+    fun connectToDevice(device: BluetoothDevice) {
         stopScan()
         manualDisconnect = false
-        if (!fromAutoReconnect) {
-            reconnectJob?.cancel()
-        }
+        isConnecting = true
         _connectionState.value = "Verbinde..."
         prefs.edit().putString("saved_mac", device.address).apply()
-        bluetoothGatt?.close()
-        bluetoothGatt = null
-        rxCharacteristic = null
-        isWriting = false
-        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        scope.launch(Dispatchers.Main) {
+            try {
+                bluetoothGatt?.disconnect()
+                bluetoothGatt?.close()
+            } catch (_: Exception) {
+            }
+            bluetoothGatt = null
+            rxCharacteristic = null
+            isWriting = false
+            bluetoothGatt = device.connectGatt(
+                context,
+                false,
+                gattCallback,
+                BluetoothDevice.TRANSPORT_LE
+            )
+        }
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                reconnectJob?.cancel()
+            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                isConnecting = false
                 _connectionState.value = "Suche Dienste..."
                 gatt.requestMtu(185)
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                isConnecting = false
                 _isConnected.value = false
-                _connectionState.value = "Verbindung unterbrochen – stelle wieder her..."
                 rxCharacteristic = null
                 isWriting = false
                 commandQueue.clear()
-                startAutoReconnectLoop()
+                try {
+                    gatt.close()
+                } catch (_: Exception) {
+                }
+                if (bluetoothGatt == gatt) {
+                    bluetoothGatt = null
+                }
+                if (!manualDisconnect && prefs.getString("saved_mac", null) != null) {
+                    _connectionState.value = "Verbindung unterbrochen – stelle wieder her..."
+                    scheduleReconnect(immediate = true)
+                } else {
+                    _connectionState.value = "Getrennt"
+                }
             }
         }
 
@@ -273,15 +336,32 @@ class MeshCoreBleManager(private val context: Context) {
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            val service = gatt.getService(SERVICE_UUID) ?: return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                gatt.disconnect()
+                return
+            }
+            val service = gatt.getService(SERVICE_UUID) ?: run {
+                gatt.disconnect()
+                return
+            }
             rxCharacteristic = service.getCharacteristic(RX_CHAR_UUID)
             val txCharacteristic = service.getCharacteristic(TX_CHAR_UUID)
 
             if (txCharacteristic != null) {
                 gatt.setCharacteristicNotification(txCharacteristic, true)
                 val descriptor = txCharacteristic.getDescriptor(CCCD_UUID)
-                descriptor?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
+                if (descriptor != null) {
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    gatt.writeDescriptor(descriptor)
+                } else {
+                    _isConnected.value = true
+                    _connectionState.value = "Verbunden"
+                    initializeMeshCoreSession()
+                }
+            } else {
+                _isConnected.value = true
+                _connectionState.value = "Verbunden"
+                initializeMeshCoreSession()
             }
         }
 
@@ -318,32 +398,9 @@ class MeshCoreBleManager(private val context: Context) {
         }.array()
         enqueueCommand(timeCmd)
 
-        applyRadioConfig(_radioConfig.value, saveToPrefs = false)
-
         syncContacts()
         syncChannels()
         enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
-    }
-
-    fun applyRadioConfig(config: RadioConfig, saveToPrefs: Boolean = true) {
-        if (saveToPrefs) {
-            prefs.edit()
-                .putString("radio_preset", config.presetLabel)
-                .putInt("radio_freq_khz", config.freqKhz)
-                .putInt("radio_bw_khz", config.bwKhz)
-                .putInt("radio_sf", config.sf)
-                .putInt("radio_cr", config.cr)
-                .apply()
-        }
-        _radioConfig.value = config
-
-        val buffer = ByteBuffer.allocate(1 + 4 + 4 + 1 + 1).order(ByteOrder.LITTLE_ENDIAN)
-        buffer.put(CMD_SET_RADIO_PARAMS)
-        buffer.putInt(config.freqKhz)
-        buffer.putInt(config.bwKhz)
-        buffer.put(config.sf.toByte())
-        buffer.put(config.cr.toByte())
-        enqueueCommand(buffer.array())
     }
 
     fun sendAdvertNow() {
@@ -446,6 +503,8 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(textBytes)
                 enqueueCommand(buffer.array())
 
+                // Direct message stays SENDING (red) until PUSH_SEND_CONFIRMED (0x82) arrives
+                // or DIRECT_MSG_TIMEOUT_MS (180s) expires -> FAILED (red).
                 _messages.value = _messages.value + ChatMessage(
                     id = msgId,
                     targetId = target.id,
@@ -477,43 +536,41 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(textBytes)
                 enqueueCommand(buffer.array())
 
+                // Group chats have no delivery confirmation; always displayed permanently blue (GROUP_SENT)
                 _messages.value = _messages.value + ChatMessage(
                     id = msgId,
                     targetId = target.id,
                     text = cleanText,
                     isFromMe = true,
-                    deliveryStatus = DeliveryStatus.SENDING,
-                    expectedAckTag = ackTag
+                    deliveryStatus = DeliveryStatus.GROUP_SENT,
+                    expectedAckTag = null
                 )
-
-                scope.launch {
-                    delay(5_000L)
-                    _messages.value = _messages.value.map { m ->
-                        if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
-                            m.copy(deliveryStatus = DeliveryStatus.DELIVERED)
-                        } else m
-                    }
-                }
             }
         }
     }
 
-    private fun markMessageDelivered(ackTag: Int?) {
+    private fun markDirectMessageDelivered(ackTag: Int?) {
         val currentList = _messages.value
         val exactMatchIdx = if (ackTag != null && ackTag != 0) {
-            currentList.indexOfFirst { it.isFromMe && it.deliveryStatus == DeliveryStatus.SENDING && it.expectedAckTag == ackTag }
+            currentList.indexOfFirst {
+                it.isFromMe &&
+                    it.deliveryStatus == DeliveryStatus.SENDING &&
+                    it.expectedAckTag == ackTag
+            }
         } else -1
 
-        val fallbackIdx = if (exactMatchIdx >= 0) {
+        val targetIdx = if (exactMatchIdx >= 0) {
             exactMatchIdx
         } else {
-            currentList.indexOfFirst { it.isFromMe && it.deliveryStatus == DeliveryStatus.SENDING }
+            currentList.indexOfFirst {
+                it.isFromMe && it.deliveryStatus == DeliveryStatus.SENDING
+            }
         }
 
-        if (fallbackIdx < 0) return
+        if (targetIdx < 0) return
 
         _messages.value = currentList.mapIndexed { idx, msg ->
-            if (idx == fallbackIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
+            if (idx == targetIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
         }
     }
 
@@ -537,17 +594,13 @@ class MeshCoreBleManager(private val context: Context) {
     private fun handleIncomingFrame(frame: ByteArray) {
         if (frame.isEmpty()) return
         when (frame[0]) {
+            // Only true end-to-end / recipient delivery push (0x82) confirms direct message arrival.
+            // RESP_SENT (0x06) only indicates local/repeater transmission, NOT final delivery.
             PUSH_SEND_CONFIRMED -> {
                 val ackTag = if (frame.size >= 5) {
                     ByteBuffer.wrap(frame, 1, 4).order(ByteOrder.LITTLE_ENDIAN).int and 0x7FFFFFFF
                 } else null
-                markMessageDelivered(ackTag)
-            }
-            RESP_SENT -> {
-                val ackTag = if (frame.size >= 6) {
-                    ByteBuffer.wrap(frame, 2, 4).order(ByteOrder.LITTLE_ENDIAN).int and 0x7FFFFFFF
-                } else null
-                markMessageDelivered(ackTag)
+                markDirectMessageDelivered(ackTag)
             }
             PUSH_MSG_WAITING -> {
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
