@@ -31,7 +31,7 @@ data class MeshContact(
     val isAllowedForKid: Boolean = false
 ) {
     val displayName: String
-        get() = aliasName.ifBlank { originalName }
+        get() = aliasName.trim().ifBlank { originalName.trim() }
 }
 
 data class MeshChannel(
@@ -42,7 +42,7 @@ data class MeshChannel(
     val isAllowedForKid: Boolean = false
 ) {
     val displayName: String
-        get() = aliasName.ifBlank { originalName }
+        get() = aliasName.trim().ifBlank { originalName.trim() }
 }
 
 enum class ChatTargetType {
@@ -81,6 +81,7 @@ class MeshCoreBleManager(private val context: Context) {
 
     companion object {
         const val DIRECT_MSG_TIMEOUT_MS: Long = 180_000L
+        const val RECONNECT_INTERVAL_MS: Long = 4_000L
 
         val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
         val RX_CHAR_UUID: UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -119,6 +120,9 @@ class MeshCoreBleManager(private val context: Context) {
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var reconnectJob: Job? = null
+    private var manualDisconnect = false
+
     private val commandQueue = ConcurrentLinkedQueue<ByteArray>()
     private var isWriting = false
 
@@ -173,9 +177,36 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun autoConnectIfSaved() {
+        if (_isConnected.value) return
         val savedAddress = prefs.getString("saved_mac", null) ?: return
+        manualDisconnect = false
         val device = bluetoothAdapter?.getRemoteDevice(savedAddress) ?: return
-        connectToDevice(device)
+        connectToDevice(device, fromAutoReconnect = true)
+    }
+
+    private fun startAutoReconnectLoop() {
+        if (manualDisconnect) return
+        val savedAddress = prefs.getString("saved_mac", null) ?: return
+        if (reconnectJob?.isActive == true) return
+
+        reconnectJob = scope.launch {
+            while (isActive && !manualDisconnect && !_isConnected.value) {
+                delay(RECONNECT_INTERVAL_MS)
+                if (_isConnected.value || manualDisconnect) break
+                val adapter = bluetoothAdapter
+                if (adapter != null && adapter.isEnabled) {
+                    _connectionState.value = "Verbinde automatisch neu..."
+                    val device = adapter.getRemoteDevice(savedAddress)
+                    withContext(Dispatchers.Main) {
+                        bluetoothGatt?.close()
+                        bluetoothGatt = null
+                        rxCharacteristic = null
+                        isWriting = false
+                        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                    }
+                }
+            }
+        }
     }
 
     fun startScan() {
@@ -191,7 +222,10 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun stopScan() {
-        bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
+        try {
+            bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
+        } catch (_: Exception) {
+        }
     }
 
     private val scanCallback = object : ScanCallback() {
@@ -203,23 +237,34 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    fun connectToDevice(device: BluetoothDevice) {
+    fun connectToDevice(device: BluetoothDevice, fromAutoReconnect: Boolean = false) {
         stopScan()
+        manualDisconnect = false
+        if (!fromAutoReconnect) {
+            reconnectJob?.cancel()
+        }
         _connectionState.value = "Verbinde..."
         prefs.edit().putString("saved_mac", device.address).apply()
         bluetoothGatt?.close()
-        bluetoothGatt = device.connectGatt(context, true, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        bluetoothGatt = null
+        rxCharacteristic = null
+        isWriting = false
+        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                reconnectJob?.cancel()
                 _connectionState.value = "Suche Dienste..."
                 gatt.requestMtu(185)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 _isConnected.value = false
-                _connectionState.value = "Verbindung unterbrochen"
+                _connectionState.value = "Verbindung unterbrochen – stelle wieder her..."
                 rxCharacteristic = null
+                isWriting = false
+                commandQueue.clear()
+                startAutoReconnectLoop()
             }
         }
 
@@ -437,21 +482,38 @@ class MeshCoreBleManager(private val context: Context) {
                     targetId = target.id,
                     text = cleanText,
                     isFromMe = true,
-                    deliveryStatus = DeliveryStatus.DELIVERED
+                    deliveryStatus = DeliveryStatus.SENDING,
+                    expectedAckTag = ackTag
                 )
+
+                scope.launch {
+                    delay(5_000L)
+                    _messages.value = _messages.value.map { m ->
+                        if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
+                            m.copy(deliveryStatus = DeliveryStatus.DELIVERED)
+                        } else m
+                    }
+                }
             }
         }
     }
 
     private fun markMessageDelivered(ackTag: Int?) {
-        val lastSendingIdx = _messages.value.indexOfLast { it.isFromMe && it.deliveryStatus == DeliveryStatus.SENDING }
-        _messages.value = _messages.value.mapIndexed { idx, msg ->
-            val isMatch = if (ackTag != null && ackTag != 0) {
-                msg.isFromMe && msg.deliveryStatus == DeliveryStatus.SENDING && msg.expectedAckTag == ackTag
-            } else {
-                idx == lastSendingIdx
-            }
-            if (isMatch) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
+        val currentList = _messages.value
+        val exactMatchIdx = if (ackTag != null && ackTag != 0) {
+            currentList.indexOfFirst { it.isFromMe && it.deliveryStatus == DeliveryStatus.SENDING && it.expectedAckTag == ackTag }
+        } else -1
+
+        val fallbackIdx = if (exactMatchIdx >= 0) {
+            exactMatchIdx
+        } else {
+            currentList.indexOfFirst { it.isFromMe && it.deliveryStatus == DeliveryStatus.SENDING }
+        }
+
+        if (fallbackIdx < 0) return
+
+        _messages.value = currentList.mapIndexed { idx, msg ->
+            if (idx == fallbackIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
         }
     }
 
@@ -579,7 +641,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private fun decodeCleanUtf8(bytes: ByteArray): String {
-        val raw = String(bytes, Charsets.UTF_8).trimEnd(' ')
+        val raw = String(bytes, Charsets.UTF_8).trimEnd('\u0000')
         return sanitizeText(raw)
     }
 
@@ -597,8 +659,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        return sb.toString().replace('', ' ').replace('
-', ' ').trim()
+        return sb.toString().replace('\r', ' ').replace('\n', ' ').trim()
     }
 
     private fun addIncomingContactMessageIfAllowed(prefixHex: String, text: String) {

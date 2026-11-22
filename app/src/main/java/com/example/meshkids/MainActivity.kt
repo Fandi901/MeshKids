@@ -29,11 +29,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 
 class MainActivity : ComponentActivity() {
     private lateinit var bleManager: MeshCoreBleManager
@@ -61,10 +64,14 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var permissionsGranted by remember { mutableStateOf(false) }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { granted ->
-        if (granted.values.all { it }) {
+        permissionsGranted = granted.values.all { it }
+        if (permissionsGranted) {
             bleManager.autoConnectIfSaved()
         }
     }
@@ -76,6 +83,18 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
         permissionLauncher.launch(perms)
+    }
+
+    DisposableEffect(lifecycleOwner, permissionsGranted) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && permissionsGranted) {
+                bleManager.autoConnectIfSaved()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     val isConnected by bleManager.isConnected.collectAsState()
