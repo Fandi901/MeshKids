@@ -7,8 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColor
-import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -39,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     private lateinit var bleManager: MeshCoreBleManager
@@ -104,6 +104,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     val allContacts by bleManager.contacts.collectAsState()
     val allChannels by bleManager.channels.collectAsState()
     val unreadTargetIds by bleManager.unreadTargetIds.collectAsState()
+    val alertCounter by bleManager.incomingAlertCounter.collectAsState()
 
     val allowedTargets = remember(allContacts, allChannels) {
         val channelTargets = allChannels.filter { it.isAllowedForKid }.map {
@@ -203,6 +204,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                     targets = allowedTargets,
                     messages = messages,
                     unreadTargetIds = unreadTargetIds,
+                    alertCounter = alertCounter,
                     onSelectTarget = {
                         bleManager.markTargetRead(it.id)
                         selectedTargetId = it.id
@@ -225,18 +227,21 @@ fun KidTargetListScreen(
     targets: List<ChatTarget>,
     messages: List<ChatMessage>,
     unreadTargetIds: Set<String>,
+    alertCounter: Long,
     onSelectTarget: (ChatTarget) -> Unit
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "unreadBlink")
-    val blinkCardColor by infiniteTransition.animateColor(
-        initialValue = Color.White,
-        targetValue = Color(0xFFFFF59D),
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 650, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "blinkCardColor"
-    )
+    // Explicit discrete blinking loop whenever unreadTargetIds is non-empty or a new message arrives
+    var blinkPhase by remember { mutableStateOf(false) }
+    LaunchedEffect(unreadTargetIds, alertCounter) {
+        if (unreadTargetIds.isEmpty()) {
+            blinkPhase = false
+        } else {
+            while (true) {
+                blinkPhase = !blinkPhase
+                delay(450L)
+            }
+        }
+    }
 
     if (targets.isEmpty()) {
         Column(
@@ -263,16 +268,21 @@ fun KidTargetListScreen(
             modifier = Modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            items(targets) { target ->
+            items(targets, key = { it.id }) { target ->
                 val lastMsg = messages.lastOrNull { it.targetId == target.id }
                 val isGroup = target.type == ChatTargetType.CHANNEL
                 val isUnread = unreadTargetIds.contains(target.id)
-                val containerColor = if (isUnread) blinkCardColor else Color.White
+                val isHighlightedNow = isUnread && blinkPhase
+                val containerColor = if (isHighlightedNow) Color(0xFFFFEE58) else Color.White
+                val border = if (isUnread) {
+                    BorderStroke(if (isHighlightedNow) 3.dp else 1.5.dp, Color(0xFFD32F2F))
+                } else null
 
                 Card(
                     modifier = Modifier.fillMaxWidth().clickable { onSelectTarget(target) },
                     shape = RoundedCornerShape(20.dp),
-                    elevation = CardDefaults.cardElevation(if (isUnread) 8.dp else 4.dp),
+                    border = border,
+                    elevation = CardDefaults.cardElevation(if (isHighlightedNow) 10.dp else 4.dp),
                     colors = CardDefaults.cardColors(containerColor = containerColor)
                 ) {
                     Row(
@@ -300,7 +310,7 @@ fun KidTargetListScreen(
                                 if (isUnread) {
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Surface(
-                                        color = Color(0xFFD32F2F),
+                                        color = if (isHighlightedNow) Color(0xFFD32F2F) else Color(0xFFE57373),
                                         shape = RoundedCornerShape(8.dp)
                                     ) {
                                         Text(
@@ -353,7 +363,7 @@ fun KidChatScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            items(messages) { msg ->
+            items(messages, key = { it.id }) { msg ->
                 val isGroupMsg = target.type == ChatTargetType.CHANNEL || msg.deliveryStatus == DeliveryStatus.GROUP_SENT
                 val bubbleColor = when {
                     !msg.isFromMe -> Color.White

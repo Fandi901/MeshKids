@@ -10,6 +10,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioAttributes
+import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.ParcelUuid
@@ -144,6 +146,11 @@ class MeshCoreBleManager(private val context: Context) {
     private val _unreadTargetIds = MutableStateFlow<Set<String>>(emptySet())
     val unreadTargetIds: StateFlow<Set<String>> = _unreadTargetIds
 
+    private val _incomingAlertCounter = MutableStateFlow(0L)
+    val incomingAlertCounter: StateFlow<Long> = _incomingAlertCounter
+
+    private var activeMediaPlayer: MediaPlayer? = null
+
     private val btStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
             if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
@@ -198,16 +205,51 @@ class MeshCoreBleManager(private val context: Context) {
 
     private fun markTargetUnreadAndPlaySound(targetId: String) {
         _unreadTargetIds.value = _unreadTargetIds.value + targetId
+        _incomingAlertCounter.value = _incomingAlertCounter.value + 1L
         playNewMessageNotificationSound()
     }
 
     // Plays notification sound strictly for newly received chat messages (never for system frames).
+    // Uses MediaPlayer with fallback to RingtoneManager so playback works reliably on BLE/IO threads.
     private fun playNewMessageNotificationSound() {
-        try {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION) ?: return
-            val ringtone = RingtoneManager.getRingtone(context.applicationContext, uri)
-            ringtone?.play()
-        } catch (_: Exception) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                activeMediaPlayer?.stop()
+                activeMediaPlayer?.release()
+                activeMediaPlayer = null
+
+                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                    ?: return@launch
+
+                val mp = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                    setDataSource(context.applicationContext, uri)
+                    setOnCompletionListener { player ->
+                        try {
+                            player.release()
+                        } catch (_: Exception) {
+                        }
+                        if (activeMediaPlayer === player) {
+                            activeMediaPlayer = null
+                        }
+                    }
+                    prepare()
+                    start()
+                }
+                activeMediaPlayer = mp
+            } catch (_: Exception) {
+                try {
+                    val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION) ?: return@launch
+                    RingtoneManager.getRingtone(context.applicationContext, uri)?.play()
+                } catch (_: Exception) {
+                }
+            }
         }
     }
 
@@ -239,7 +281,6 @@ class MeshCoreBleManager(private val context: Context) {
                     isConnecting = false
                     continue
                 }
-                // Reset stale connection attempt after 10s so reconnect never gets stuck
                 if (isConnecting && (System.currentTimeMillis() - connectAttemptStartedAtMs) > 10_000L) {
                     isConnecting = false
                 }
@@ -465,8 +506,19 @@ class MeshCoreBleManager(private val context: Context) {
     fun setContactAlias(prefixHex: String, alias: String) {
         val cleanAlias = sanitizeText(alias).take(24)
         prefs.edit().putString("contact_alias_$prefixHex", cleanAlias).apply()
-        _contacts.value = _contacts.value.map {
+        val updatedContacts = _contacts.value.map {
             if (it.pubKeyPrefixHex == prefixHex) it.copy(aliasName = cleanAlias) else it
+        }
+        _contacts.value = updatedContacts
+        refreshExistingMessageSenderNames(updatedContacts)
+    }
+
+    private fun refreshExistingMessageSenderNames(currentContacts: List<MeshContact>) {
+        _messages.value = _messages.value.map { msg ->
+            if (!msg.isFromMe && !msg.senderName.isNullOrBlank()) {
+                val mapped = resolveContactName(msg.senderName, currentContacts)
+                if (mapped != msg.senderName) msg.copy(senderName = mapped) else msg
+            } else msg
         }
     }
 
@@ -600,44 +652,54 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     // Resolves sender name in group chat using known contacts (preferring alias) and removing leading 'k' prefix.
+    // Example: incoming sender "kOnkel" where contact has originalName="Onkel" and aliasName="Papa" -> "Papa".
     private fun resolveGroupSenderAndBody(rawPayload: String): Pair<String?, String> {
         val colonIdx = rawPayload.indexOf(": ")
-        if (colonIdx > 0 && colonIdx < 32) {
+        if (colonIdx > 0 && colonIdx < 40) {
             val rawSender = rawPayload.substring(0, colonIdx).trim()
             val body = rawPayload.substring(colonIdx + 2).trim()
-            return resolveContactName(rawSender) to body
+            return resolveContactName(rawSender, _contacts.value) to body
         }
         return null to rawPayload.trim()
     }
 
-    private fun resolveContactName(rawSender: String): String {
-        val cleanedRaw = stripLeadingK(rawSender.trim())
-        val lowerRaw = cleanedRaw.lowercase()
+    private fun resolveContactName(rawSender: String, contactsList: List<MeshContact>): String {
+        val trimmedSender = rawSender.trim()
+        val cleanedSender = stripLeadingK(trimmedSender)
 
-        // Match against known contacts by alias, original name (with/without 'k'), or pubKey prefix
-        val matched = _contacts.value.firstOrNull { c ->
-            val aliasClean = stripLeadingK(c.aliasName.trim()).lowercase()
-            val origClean = stripLeadingK(c.originalName.trim()).lowercase()
+        val candidates = listOf(trimmedSender, cleanedSender)
+            .map { it.lowercase() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+
+        for (c in contactsList) {
+            val aliasRaw = c.aliasName.trim()
+            val aliasClean = stripLeadingK(aliasRaw)
+            val origRaw = c.originalName.trim()
+            val origClean = stripLeadingK(origRaw)
             val prefixLower = c.pubKeyPrefixHex.lowercase()
-            lowerRaw == aliasClean ||
-                lowerRaw == origClean ||
-                lowerRaw == c.originalName.trim().lowercase() ||
-                (prefixLower.isNotEmpty() && lowerRaw.startsWith(prefixLower))
+
+            val knownKeys = listOf(aliasRaw, aliasClean, origRaw, origClean)
+                .map { it.lowercase() }
+                .filter { it.isNotEmpty() }
+
+            val matchesContact = candidates.any { cand ->
+                knownKeys.contains(cand) || (prefixLower.isNotEmpty() && cand.startsWith(prefixLower))
+            }
+
+            if (matchesContact) {
+                val chosen = if (aliasClean.isNotEmpty()) aliasClean else origClean
+                if (chosen.isNotEmpty()) return chosen
+            }
         }
 
-        if (matched != null) {
-            return stripLeadingK(matched.displayName).ifBlank { cleanedRaw }
-        }
-        return cleanedRaw
+        return cleanedSender
     }
 
     private fun stripLeadingK(name: String): String {
         if (name.length > 1 && name.startsWith("k", ignoreCase = true)) {
-            val nextChar = name[1]
-            // e.g., "kMama" or "k: Mama" or "k Mama" or "k_Mama"
-            if (nextChar == ':' || nextChar == ' ' || nextChar == '_' || nextChar == '-' || nextChar.isUpperCase()) {
-                return name.substring(1).removePrefix(":").trim()
-            }
+            val rest = name.substring(1).removePrefix(":").trim()
+            if (rest.isNotEmpty()) return rest
         }
         return name
     }
@@ -645,7 +707,7 @@ class MeshCoreBleManager(private val context: Context) {
     private fun handleIncomingFrame(frame: ByteArray) {
         if (frame.isEmpty()) return
         when (frame[0]) {
-            // System frames -> never trigger message notification sound
+            // System frames -> never trigger message notification sound or unread blink
             PUSH_SEND_CONFIRMED -> {
                 val ackTag = if (frame.size >= 5) {
                     ByteBuffer.wrap(frame, 1, 4).order(ByteOrder.LITTLE_ENDIAN).int and 0x7FFFFFFF
@@ -669,6 +731,7 @@ class MeshCoreBleManager(private val context: Context) {
                     val updated = _contacts.value.filterNot { it.pubKeyPrefixHex == prefixHex } +
                             MeshContact(prefixHex, prefixBytes, origName, aliasName, isAllowed)
                     _contacts.value = updated
+                    refreshExistingMessageSenderNames(updated)
                 }
             }
             RESP_CHANNEL_INFO -> {
