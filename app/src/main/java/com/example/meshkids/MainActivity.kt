@@ -134,8 +134,8 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
         allowedTargets.firstOrNull { it.id == selectedTargetId }
     }
 
-    LaunchedEffect(selectedTargetId) {
-        selectedTargetId?.let { bleManager.markTargetRead(it) }
+    LaunchedEffect(selectedTarget?.id) {
+        selectedTarget?.let { bleManager.markTargetRead(it.id) }
     }
 
     var showPinDialog by remember { mutableStateOf(false) }
@@ -207,8 +207,8 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                     unreadTargetIds = unreadTargetIds,
                     alertCounter = alertCounter,
                     onSelectTarget = {
-                        bleManager.markTargetRead(it.id)
                         selectedTargetId = it.id
+                        bleManager.markTargetRead(it.id)
                     }
                 )
             } else {

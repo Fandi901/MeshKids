@@ -155,7 +155,7 @@ class MeshCoreBleManager(private val context: Context) {
     private val _quickReplies = MutableStateFlow<List<String>>(loadQuickReplies())
     val quickReplies: StateFlow<List<String>> = _quickReplies
 
-    private val _unreadTargetIds = MutableStateFlow<Set<String>>(emptySet())
+    private val _unreadTargetIds = MutableStateFlow<Set<String>>(loadPersistedUnreadTargetIds())
     val unreadTargetIds: StateFlow<Set<String>> = _unreadTargetIds
 
     private val _incomingAlertCounter = MutableStateFlow(0L)
@@ -329,14 +329,26 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+    private fun loadPersistedUnreadTargetIds(): Set<String> {
+        return prefs.getStringSet("unread_target_ids", emptySet())?.toSet() ?: emptySet()
+    }
+
+    private fun saveUnreadTargetIds(set: Set<String>) {
+        prefs.edit().putStringSet("unread_target_ids", set.toSet()).apply()
+    }
+
     fun markTargetRead(targetId: String) {
         if (_unreadTargetIds.value.contains(targetId)) {
-            _unreadTargetIds.value = _unreadTargetIds.value - targetId
+            val updated = _unreadTargetIds.value - targetId
+            saveUnreadTargetIds(updated)
+            _unreadTargetIds.value = updated
         }
     }
 
     private fun markTargetUnreadAndPlaySound(targetId: String) {
-        _unreadTargetIds.value = _unreadTargetIds.value + targetId
+        val updated = _unreadTargetIds.value + targetId
+        saveUnreadTargetIds(updated)
+        _unreadTargetIds.value = updated
         _incomingAlertCounter.value = _incomingAlertCounter.value + 1L
         playNewMessageNotificationSound()
     }
