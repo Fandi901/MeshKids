@@ -127,6 +127,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     }
 
     val messages by bleManager.messages.collectAsState()
+    val quickReplies by bleManager.quickReplies.collectAsState()
 
     var selectedTargetId by remember { mutableStateOf<String?>(null) }
     val selectedTarget = remember(selectedTargetId, allowedTargets) {
@@ -213,7 +214,8 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
             } else {
                 KidChatScreen(
                     target = selectedTarget,
-                    messages = messages.filter { it.targetId == selectedTarget.id },
+                    messages = messages.filter { it.targetId == selectedTarget.id }.takeLast(20),
+                    quickReplies = quickReplies,
                     isConnected = isConnected,
                     onSendMessage = { text -> bleManager.sendMessage(selectedTarget, text) }
                 )
@@ -269,7 +271,7 @@ fun KidTargetListScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(targets, key = { it.id }) { target ->
-                val lastMsg = messages.lastOrNull { it.targetId == target.id }
+                val lastMsg = messages.filter { it.targetId == target.id }.maxByOrNull { it.timestamp }
                 val isGroup = target.type == ChatTargetType.CHANNEL
                 val isUnread = unreadTargetIds.contains(target.id)
                 val isHighlightedNow = isUnread && blinkPhase
@@ -342,16 +344,11 @@ fun KidTargetListScreen(
 fun KidChatScreen(
     target: ChatTarget,
     messages: List<ChatMessage>,
+    quickReplies: List<String>,
     isConnected: Boolean,
     onSendMessage: (String) -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
-    val quickReplies = listOf(
-        "Hallo!",
-        "Bin gut angekommen!",
-        "Ich komme jetzt nach Hause",
-        "Kannst du mich abholen?"
-    )
 
     val blueGroupColor = Color(0xFF1E88E5)
     val greenDeliveredColor = Color(0xFF2E7D32)
@@ -743,6 +740,67 @@ fun ParentSettingsScreen(
                         }
                     }) {
                         Text("PIN setzen")
+                    }
+                }
+            }
+
+            item {
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                val currentReplies by bleManager.quickReplies.collectAsState()
+                var reply1 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(0) { "" }) }
+                var reply2 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(1) { "" }) }
+                var reply3 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(2) { "" }) }
+                var reply4 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(3) { "" }) }
+
+                Text("6. Voreingestellte Schnelltexte (unten im Chat)", fontWeight = FontWeight.Bold)
+                Text("Diese Felder erscheinen direkt ueber dem Eingabefeld im Chat und koennen angepasst werden.", fontSize = 13.sp, color = Color.Gray)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = reply1,
+                    onValueChange = { if (it.length <= 60) reply1 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 1") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = reply2,
+                    onValueChange = { if (it.length <= 60) reply2 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 2") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = reply3,
+                    onValueChange = { if (it.length <= 60) reply3 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 3") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = reply4,
+                    onValueChange = { if (it.length <= 60) reply4 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 4") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        bleManager.setQuickReplies(listOf(reply1, reply2, reply3, reply4))
+                        infoBanner = "Schnelltexte gespeichert."
+                    }) {
+                        Text("Schnelltexte speichern")
+                    }
+                    OutlinedButton(onClick = {
+                        bleManager.setQuickReplies(MeshCoreBleManager.DEFAULT_QUICK_REPLIES)
+                        infoBanner = "Standard-Schnelltexte wiederhergestellt."
+                    }) {
+                        Text("Standard")
                     }
                 }
             }

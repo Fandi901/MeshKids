@@ -16,6 +16,8 @@ import android.media.RingtoneManager
 import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.*
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.nio.ByteBuffer
@@ -82,6 +84,13 @@ class MeshCoreBleManager(private val context: Context) {
     companion object {
         const val DIRECT_MSG_TIMEOUT_MS: Long = 180_000L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
+        const val MAX_MESSAGES_PER_TARGET: Int = 20
+        val DEFAULT_QUICK_REPLIES: List<String> = listOf(
+            "Hallo!",
+            "Bin gut angekommen!",
+            "Ich komme jetzt nach Hause",
+            "Kannst du mich abholen?"
+        )
 
         val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
         val RX_CHAR_UUID: UUID = UUID.fromString("6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -140,8 +149,11 @@ class MeshCoreBleManager(private val context: Context) {
     private val _channels = MutableStateFlow<List<MeshChannel>>(loadCachedDeviceChannels())
     val channels: StateFlow<List<MeshChannel>> = _channels
 
-    private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    private val _messages = MutableStateFlow<List<ChatMessage>>(loadPersistedMessages())
     val messages: StateFlow<List<ChatMessage>> = _messages
+
+    private val _quickReplies = MutableStateFlow<List<String>>(loadQuickReplies())
+    val quickReplies: StateFlow<List<String>> = _quickReplies
 
     private val _unreadTargetIds = MutableStateFlow<Set<String>>(emptySet())
     val unreadTargetIds: StateFlow<Set<String>> = _unreadTargetIds
@@ -175,6 +187,126 @@ class MeshCoreBleManager(private val context: Context) {
             context.registerReceiver(btStateReceiver, filter)
         }
         startReconnectWatchdog()
+    }
+
+    private fun loadQuickReplies(): List<String> {
+        val rawJson = prefs.getString("quick_replies_json", null)
+        if (rawJson.isNullOrBlank()) return DEFAULT_QUICK_REPLIES
+        return try {
+            val arr = JSONArray(rawJson)
+            val list = (0 until arr.length()).mapNotNull { idx ->
+                val item = sanitizeText(arr.optString(idx, "")).take(60)
+                if (item.isNotBlank()) item else null
+            }
+            if (list.isNotEmpty()) list else DEFAULT_QUICK_REPLIES
+        } catch (_: Exception) {
+            DEFAULT_QUICK_REPLIES
+        }
+    }
+
+    fun setQuickReplies(updatedReplies: List<String>) {
+        val cleaned = updatedReplies
+            .map { sanitizeText(it).take(60) }
+            .filter { it.isNotBlank() }
+            .ifEmpty { DEFAULT_QUICK_REPLIES }
+        val arr = JSONArray()
+        cleaned.forEach { arr.put(it) }
+        prefs.edit().putString("quick_replies_json", arr.toString()).apply()
+        _quickReplies.value = cleaned
+    }
+
+    // Keep at most MAX_MESSAGES_PER_TARGET (20) messages per chat target and persist them.
+    private fun trimAndPersistMessages(rawList: List<ChatMessage>): List<ChatMessage> {
+        val countsByTarget = mutableMapOf<String, Int>()
+        val keptReversed = ArrayList<ChatMessage>(rawList.size)
+        for (i in rawList.indices.reversed()) {
+            val msg = rawList[i]
+            val currentCount = countsByTarget[msg.targetId] ?: 0
+            if (currentCount < MAX_MESSAGES_PER_TARGET) {
+                countsByTarget[msg.targetId] = currentCount + 1
+                keptReversed.add(msg)
+            }
+        }
+        val trimmed = keptReversed.asReversed()
+        saveMessagesToPrefs(trimmed)
+        return trimmed
+    }
+
+    private fun updateMessages(transform: (List<ChatMessage>) -> List<ChatMessage>) {
+        _messages.value = trimAndPersistMessages(transform(_messages.value))
+    }
+
+    private fun saveMessagesToPrefs(list: List<ChatMessage>) {
+        try {
+            val arr = JSONArray()
+            for (msg in list) {
+                val obj = JSONObject().apply {
+                    put("id", msg.id)
+                    put("targetId", msg.targetId)
+                    put("senderName", msg.senderName ?: JSONObject.NULL)
+                    put("text", msg.text)
+                    put("isFromMe", msg.isFromMe)
+                    put("deliveryStatus", msg.deliveryStatus.name)
+                    put("expectedAckTag", msg.expectedAckTag ?: JSONObject.NULL)
+                    put("timestamp", msg.timestamp)
+                }
+                arr.put(obj)
+            }
+            prefs.edit().putString("chat_history_json", arr.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun loadPersistedMessages(): List<ChatMessage> {
+        val rawJson = prefs.getString("chat_history_json", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(rawJson)
+            val parsed = ArrayList<ChatMessage>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id", UUID.randomUUID().toString())
+                val targetId = obj.optString("targetId", "")
+                val text = obj.optString("text", "")
+                if (targetId.isBlank() || text.isBlank()) continue
+                val senderName = if (obj.isNull("senderName")) null else obj.optString("senderName", "").ifBlank { null }
+                val isFromMe = obj.optBoolean("isFromMe", false)
+                val statusName = obj.optString("deliveryStatus", DeliveryStatus.DELIVERED.name)
+                val status = try {
+                    DeliveryStatus.valueOf(statusName)
+                } catch (_: Exception) {
+                    if (isFromMe) DeliveryStatus.DELIVERED else DeliveryStatus.DELIVERED
+                }
+                // Any in-flight SENDING message from a previous process should not stay stuck forever on restart
+                val normalizedStatus = if (status == DeliveryStatus.SENDING) DeliveryStatus.FAILED else status
+                val ackTag = if (obj.isNull("expectedAckTag")) null else obj.optInt("expectedAckTag", 0).takeIf { it != 0 }
+                val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                parsed.add(
+                    ChatMessage(
+                        id = id,
+                        targetId = targetId,
+                        senderName = senderName,
+                        text = text,
+                        isFromMe = isFromMe,
+                        deliveryStatus = normalizedStatus,
+                        expectedAckTag = ackTag,
+                        timestamp = timestamp
+                    )
+                )
+            }
+            val countsByTarget = mutableMapOf<String, Int>()
+            val keptReversed = ArrayList<ChatMessage>(parsed.size)
+            for (i in parsed.indices.reversed()) {
+                val msg = parsed[i]
+                val currentCount = countsByTarget[msg.targetId] ?: 0
+                if (currentCount < MAX_MESSAGES_PER_TARGET) {
+                    countsByTarget[msg.targetId] = currentCount + 1
+                    keptReversed.add(msg)
+                }
+            }
+            keptReversed.asReversed()
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     private fun loadCachedDeviceChannels(): List<MeshChannel> {
@@ -514,11 +646,13 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private fun refreshExistingMessageSenderNames(currentContacts: List<MeshContact>) {
-        _messages.value = _messages.value.map { msg ->
-            if (!msg.isFromMe && !msg.senderName.isNullOrBlank()) {
-                val mapped = resolveContactName(msg.senderName, currentContacts)
-                if (mapped != msg.senderName) msg.copy(senderName = mapped) else msg
-            } else msg
+        updateMessages { list ->
+            list.map { msg ->
+                if (!msg.isFromMe && !msg.senderName.isNullOrBlank()) {
+                    val mapped = resolveContactName(msg.senderName, currentContacts)
+                    if (mapped != msg.senderName) msg.copy(senderName = mapped) else msg
+                } else msg
+            }
         }
     }
 
@@ -562,21 +696,25 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(textBytes)
                 enqueueCommand(buffer.array())
 
-                _messages.value = _messages.value + ChatMessage(
-                    id = msgId,
-                    targetId = target.id,
-                    text = cleanText,
-                    isFromMe = true,
-                    deliveryStatus = DeliveryStatus.SENDING,
-                    expectedAckTag = ackTag
-                )
+                updateMessages { list ->
+                    list + ChatMessage(
+                        id = msgId,
+                        targetId = target.id,
+                        text = cleanText,
+                        isFromMe = true,
+                        deliveryStatus = DeliveryStatus.SENDING,
+                        expectedAckTag = ackTag
+                    )
+                }
 
                 scope.launch {
                     delay(DIRECT_MSG_TIMEOUT_MS)
-                    _messages.value = _messages.value.map { m ->
-                        if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
-                            m.copy(deliveryStatus = DeliveryStatus.FAILED)
-                        } else m
+                    updateMessages { list ->
+                        list.map { m ->
+                            if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
+                                m.copy(deliveryStatus = DeliveryStatus.FAILED)
+                            } else m
+                        }
                     }
                 }
             }
@@ -593,14 +731,16 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(textBytes)
                 enqueueCommand(buffer.array())
 
-                _messages.value = _messages.value + ChatMessage(
-                    id = msgId,
-                    targetId = target.id,
-                    text = cleanText,
-                    isFromMe = true,
-                    deliveryStatus = DeliveryStatus.GROUP_SENT,
-                    expectedAckTag = null
-                )
+                updateMessages { list ->
+                    list + ChatMessage(
+                        id = msgId,
+                        targetId = target.id,
+                        text = cleanText,
+                        isFromMe = true,
+                        deliveryStatus = DeliveryStatus.GROUP_SENT,
+                        expectedAckTag = null
+                    )
+                }
             }
         }
     }
@@ -625,8 +765,10 @@ class MeshCoreBleManager(private val context: Context) {
 
         if (targetIdx < 0) return
 
-        _messages.value = currentList.mapIndexed { idx, msg ->
-            if (idx == targetIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
+        updateMessages { list ->
+            list.mapIndexed { idx, msg ->
+                if (idx == targetIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
+            }
         }
     }
 
@@ -764,36 +906,48 @@ class MeshCoreBleManager(private val context: Context) {
             RESP_CONTACT_MSG_RECV -> {
                 if (frame.size > 13) {
                     val prefixHex = frame.copyOfRange(1, 7).joinToString("") { "%02x".format(it) }
+                    val tsMs = extractEpochMs(frame, 8)
                     val text = decodeCleanUtf8(frame.copyOfRange(13, frame.size))
-                    if (text.isNotBlank()) addIncomingContactMessageIfAllowed(prefixHex, text)
+                    if (text.isNotBlank()) addIncomingContactMessageIfAllowed(prefixHex, text, tsMs)
                 }
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
             }
             RESP_CONTACT_MSG_RECV_V3 -> {
                 if (frame.size > 16) {
                     val prefixHex = frame.copyOfRange(4, 10).joinToString("") { "%02x".format(it) }
+                    val tsMs = extractEpochMs(frame, 11)
                     val text = decodeCleanUtf8(frame.copyOfRange(16, frame.size))
-                    if (text.isNotBlank()) addIncomingContactMessageIfAllowed(prefixHex, text)
+                    if (text.isNotBlank()) addIncomingContactMessageIfAllowed(prefixHex, text, tsMs)
                 }
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
             }
             RESP_CHANNEL_MSG_RECV -> {
                 if (frame.size > 7) {
                     val chIdx = frame[1].toInt() and 0xFF
+                    val tsMs = extractEpochMs(frame, 3)
                     val rawText = decodeCleanUtf8(frame.copyOfRange(7, frame.size))
-                    if (rawText.isNotBlank()) addIncomingChannelMessageIfAllowed(chIdx, rawText)
+                    if (rawText.isNotBlank()) addIncomingChannelMessageIfAllowed(chIdx, rawText, tsMs)
                 }
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
             }
             RESP_CHANNEL_MSG_RECV_V3 -> {
                 if (frame.size > 10) {
                     val chIdx = frame[4].toInt() and 0xFF
+                    val tsMs = extractEpochMs(frame, 6)
                     val rawText = decodeCleanUtf8(frame.copyOfRange(10, frame.size))
-                    if (rawText.isNotBlank()) addIncomingChannelMessageIfAllowed(chIdx, rawText)
+                    if (rawText.isNotBlank()) addIncomingChannelMessageIfAllowed(chIdx, rawText, tsMs)
                 }
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
             }
         }
+    }
+
+
+    private fun extractEpochMs(frame: ByteArray, offset: Int): Long {
+        if (offset < 0 || offset + 4 > frame.size) return System.currentTimeMillis()
+        val sec = ByteBuffer.wrap(frame, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
+        // Reasonable Unix epoch check (after year 2020 and not far in future)
+        return if (sec in 1_577_836_800L..4_102_444_800L) sec * 1000L else System.currentTimeMillis()
     }
 
     private fun decodeCleanUtf8(bytes: ByteArray): String {
@@ -818,34 +972,42 @@ class MeshCoreBleManager(private val context: Context) {
         return sb.toString().replace('\r', ' ').replace('\n', ' ').trim()
     }
 
-    private fun addIncomingContactMessageIfAllowed(prefixHex: String, text: String) {
+    private fun addIncomingContactMessageIfAllowed(prefixHex: String, text: String, msgTimestampMs: Long = System.currentTimeMillis()) {
         val allowedSet = prefs.getStringSet("allowed_contacts", emptySet()) ?: emptySet()
         if (!allowedSet.contains(prefixHex)) return
 
         val senderDisplay = _contacts.value.firstOrNull { it.pubKeyPrefixHex == prefixHex }?.displayName
-        _messages.value = _messages.value + ChatMessage(
-            targetId = prefixHex,
-            senderName = senderDisplay,
-            text = text,
-            isFromMe = false,
-            deliveryStatus = DeliveryStatus.DELIVERED
-        )
+        val safeTs = if (msgTimestampMs > 0L) msgTimestampMs else System.currentTimeMillis()
+        updateMessages { list ->
+            (list + ChatMessage(
+                targetId = prefixHex,
+                senderName = senderDisplay,
+                text = text,
+                isFromMe = false,
+                deliveryStatus = DeliveryStatus.DELIVERED,
+                timestamp = safeTs
+            )).sortedBy { it.timestamp }
+        }
         markTargetUnreadAndPlaySound(prefixHex)
     }
 
-    private fun addIncomingChannelMessageIfAllowed(channelIndex: Int, rawText: String) {
+    private fun addIncomingChannelMessageIfAllowed(channelIndex: Int, rawText: String, msgTimestampMs: Long = System.currentTimeMillis()) {
         val allowedSet = prefs.getStringSet("allowed_channels", emptySet()) ?: emptySet()
         if (!allowedSet.contains(channelIndex.toString())) return
 
         val (sender, body) = resolveGroupSenderAndBody(rawText)
         val targetId = "ch_$channelIndex"
-        _messages.value = _messages.value + ChatMessage(
-            targetId = targetId,
-            senderName = sender,
-            text = body,
-            isFromMe = false,
-            deliveryStatus = DeliveryStatus.DELIVERED
-        )
+        val safeTs = if (msgTimestampMs > 0L) msgTimestampMs else System.currentTimeMillis()
+        updateMessages { list ->
+            (list + ChatMessage(
+                targetId = targetId,
+                senderName = sender,
+                text = body,
+                isFromMe = false,
+                deliveryStatus = DeliveryStatus.DELIVERED,
+                timestamp = safeTs
+            )).sortedBy { it.timestamp }
+        }
         markTargetUnreadAndPlaySound(targetId)
     }
 
