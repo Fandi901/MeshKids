@@ -17,7 +17,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -94,10 +93,8 @@ class MeshCoreBleManager(private val context: Context) {
         const val CMD_SET_ADVERT_NAME: Byte = 0x08
         const val CMD_SYNC_NEXT_MESSAGE: Byte = 0x0A
         const val CMD_GET_CHANNEL: Byte = 0x1F
-        const val CMD_SET_CHANNEL: Byte = 0x20
 
         const val RESP_CONTACT: Byte = 0x03
-        const val RESP_SENT: Byte = 0x06
         const val RESP_CONTACT_MSG_RECV: Byte = 0x07
         const val RESP_CHANNEL_MSG_RECV: Byte = 0x08
         const val RESP_CONTACT_MSG_RECV_V3: Byte = 0x10
@@ -135,7 +132,7 @@ class MeshCoreBleManager(private val context: Context) {
     private val _contacts = MutableStateFlow<List<MeshContact>>(emptyList())
     val contacts: StateFlow<List<MeshContact>> = _contacts
 
-    private val _channels = MutableStateFlow<List<MeshChannel>>(loadInitialChannels())
+    private val _channels = MutableStateFlow<List<MeshChannel>>(loadCachedDeviceChannels())
     val channels: StateFlow<List<MeshChannel>> = _channels
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -166,20 +163,24 @@ class MeshCoreBleManager(private val context: Context) {
         startReconnectWatchdog()
     }
 
-    private fun loadInitialChannels(): List<MeshChannel> {
+    // Only load channels previously read from the MeshCore device (no synthesized channels).
+    private fun loadCachedDeviceChannels(): List<MeshChannel> {
         val allowedSet = prefs.getStringSet("allowed_channels", emptySet()) ?: emptySet()
-        return (0..7).map { idx ->
-            val defaultOrig = if (idx == 0) "Oeffentlich" else "Kanal $idx"
-            val savedOrig = prefs.getString("channel_orig_$idx", defaultOrig) ?: defaultOrig
-            val savedAlias = prefs.getString("channel_alias_$idx", if (idx == 1) "Familie" else "") ?: ""
-            val hasPsk = prefs.getBoolean("channel_has_psk_$idx", false)
-            MeshChannel(
-                index = idx,
-                originalName = savedOrig,
-                aliasName = savedAlias,
-                isEncryptedPskSet = hasPsk,
-                isAllowedForKid = allowedSet.contains(idx.toString())
-            )
+        return (0..7).mapNotNull { idx ->
+            val deviceName = prefs.getString("device_channel_name_$idx", null)
+            if (deviceName.isNullOrBlank()) {
+                null
+            } else {
+                val savedAlias = prefs.getString("channel_alias_$idx", "") ?: ""
+                val hasPsk = prefs.getBoolean("device_channel_has_psk_$idx", false)
+                MeshChannel(
+                    index = idx,
+                    originalName = deviceName,
+                    aliasName = savedAlias,
+                    isEncryptedPskSet = hasPsk,
+                    isAllowedForKid = allowedSet.contains(idx.toString())
+                )
+            }
         }
     }
 
@@ -399,7 +400,7 @@ class MeshCoreBleManager(private val context: Context) {
         enqueueCommand(timeCmd)
 
         syncContacts()
-        syncChannels()
+        syncChannelsFromDevice()
         enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
     }
 
@@ -411,47 +412,10 @@ class MeshCoreBleManager(private val context: Context) {
         enqueueCommand(byteArrayOf(CMD_GET_CONTACTS))
     }
 
-    fun syncChannels() {
+    // Read-only import of channels configured on the MeshCore device.
+    fun syncChannelsFromDevice() {
         for (idx in 0..7) {
             enqueueCommand(byteArrayOf(CMD_GET_CHANNEL, idx.toByte()))
-        }
-    }
-
-    fun configureChannelOnDevice(channelIndex: Int, channelName: String, pskInput: String = "") {
-        val cleanName = sanitizeText(channelName).take(31)
-        if (cleanName.isEmpty() || channelIndex !in 0..7) return
-
-        val pskBytes: ByteArray = if (channelIndex == 0 && pskInput.isBlank()) {
-            ByteArray(16)
-        } else if (pskInput.trim().matches(Regex("^[0-9a-fA-F]{32}$"))) {
-            pskInput.trim().chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        } else {
-            val secretSource = if (pskInput.isNotBlank()) pskInput.trim() else "MeshKidsFamily:$cleanName:$channelIndex"
-            MessageDigest.getInstance("SHA-256").digest(secretSource.toByteArray(Charsets.UTF_8)).copyOf(16)
-        }
-
-        val hasNonZeroPsk = pskBytes.any { it.toInt() != 0 }
-        val nameBytes = cleanName.toByteArray(Charsets.UTF_8)
-
-        val buffer = ByteBuffer.allocate(1 + 1 + 32 + 16)
-        buffer.put(CMD_SET_CHANNEL)
-        buffer.put(channelIndex.toByte())
-        buffer.put(nameBytes.copyOf(32))
-        buffer.put(pskBytes)
-        enqueueCommand(buffer.array())
-
-        prefs.edit()
-            .putString("channel_orig_$channelIndex", cleanName)
-            .putBoolean("channel_has_psk_$channelIndex", hasNonZeroPsk)
-            .apply()
-
-        _channels.value = _channels.value.map {
-            if (it.index == channelIndex) {
-                it.copy(
-                    originalName = cleanName,
-                    isEncryptedPskSet = hasNonZeroPsk
-                )
-            } else it
         }
     }
 
@@ -503,8 +467,6 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(textBytes)
                 enqueueCommand(buffer.array())
 
-                // Direct message stays SENDING (red) until PUSH_SEND_CONFIRMED (0x82) arrives
-                // or DIRECT_MSG_TIMEOUT_MS (180s) expires -> FAILED (red).
                 _messages.value = _messages.value + ChatMessage(
                     id = msgId,
                     targetId = target.id,
@@ -536,7 +498,6 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(textBytes)
                 enqueueCommand(buffer.array())
 
-                // Group chats have no delivery confirmation; always displayed permanently blue (GROUP_SENT)
                 _messages.value = _messages.value + ChatMessage(
                     id = msgId,
                     targetId = target.id,
@@ -594,8 +555,6 @@ class MeshCoreBleManager(private val context: Context) {
     private fun handleIncomingFrame(frame: ByteArray) {
         if (frame.isEmpty()) return
         when (frame[0]) {
-            // Only true end-to-end / recipient delivery push (0x82) confirms direct message arrival.
-            // RESP_SENT (0x06) only indicates local/repeater transmission, NOT final delivery.
             PUSH_SEND_CONFIRMED -> {
                 val ackTag = if (frame.size >= 5) {
                     ByteBuffer.wrap(frame, 1, 4).order(ByteOrder.LITTLE_ENDIAN).int and 0x7FFFFFFF
@@ -626,35 +585,26 @@ class MeshCoreBleManager(private val context: Context) {
                     val idx = frame[1].toInt() and 0xFF
                     if (idx in 0..7) {
                         val decodedName = decodeCleanUtf8(frame.copyOfRange(2, 34))
-                        val fallbackOrig = if (idx == 0) "Oeffentlich" else "Kanal $idx"
-                        val finalOrig = decodedName.ifBlank {
-                            prefs.getString("channel_orig_$idx", fallbackOrig) ?: fallbackOrig
-                        }
                         val hasPsk = if (frame.size >= 50) {
                             frame.copyOfRange(34, 50).any { it.toInt() != 0 }
                         } else {
-                            prefs.getBoolean("channel_has_psk_$idx", false)
+                            prefs.getBoolean("device_channel_has_psk_$idx", false)
                         }
 
-                        prefs.edit()
-                            .putString("channel_orig_$idx", finalOrig)
-                            .putBoolean("channel_has_psk_$idx", hasPsk)
-                            .apply()
-
-                        val allowedSet = prefs.getStringSet("allowed_channels", emptySet()) ?: emptySet()
-                        val isAllowed = allowedSet.contains(idx.toString())
-                        val savedAlias = prefs.getString("channel_alias_$idx", if (idx == 1) "Familie" else "") ?: ""
-
-                        _channels.value = _channels.value.map {
-                            if (it.index == idx) {
-                                it.copy(
-                                    originalName = finalOrig,
-                                    aliasName = savedAlias,
-                                    isEncryptedPskSet = hasPsk,
-                                    isAllowedForKid = isAllowed
-                                )
-                            } else it
+                        if (decodedName.isNotBlank()) {
+                            prefs.edit()
+                                .putString("device_channel_name_$idx", decodedName)
+                                .putBoolean("device_channel_has_psk_$idx", hasPsk)
+                                .apply()
+                        } else {
+                            // Unconfigured/empty slot on device: clear cached device name
+                            prefs.edit()
+                                .remove("device_channel_name_$idx")
+                                .remove("device_channel_has_psk_$idx")
+                                .apply()
                         }
+
+                        _channels.value = loadCachedDeviceChannels()
                     }
                 }
             }

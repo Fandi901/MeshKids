@@ -463,11 +463,6 @@ fun ParentSettingsScreen(
     var kidName by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
 
-    var channelIndexText by remember { mutableStateOf("1") }
-    var channelNameInput by remember { mutableStateOf("Familie") }
-    var channelAliasInput by remember { mutableStateOf("Familie") }
-    var channelPskInput by remember { mutableStateOf("") }
-
     var infoBanner by remember { mutableStateOf<String?>(null) }
 
     Scaffold(
@@ -578,81 +573,64 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("3. Gruppenchat / Kanal & PSK einrichten (ohne MeshCore-App)", fontWeight = FontWeight.Bold)
-                Text("Gleicher Kanal-Index, Name und Schluessel (PSK) auf allen Familiengeraeten verhindert Zeichensalat.", fontSize = 13.sp, color = Color.Gray)
+                Text("3. Gruppenchat / Kanaele aus Geraet uebernehmen", fontWeight = FontWeight.Bold)
+                Text("Kanaele werden nur aus dem Funkgeraet ausgelesen und nicht neu angelegt oder ueberschrieben. Du kannst hier einen Alias vergeben und den Chat freigeben.", fontSize = 13.sp, color = Color.Gray)
                 Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = channelIndexText,
-                        onValueChange = { if (it.length <= 1) channelIndexText = it.filter { c -> c.isDigit() } },
-                        modifier = Modifier.width(72.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        label = { Text("Nr.") }
-                    )
-                    OutlinedTextField(
-                        value = channelNameInput,
-                        onValueChange = { channelNameInput = it },
-                        modifier = Modifier.weight(1f),
-                        label = { Text("Kanalname") },
-                        singleLine = true
-                    )
+                Button(onClick = {
+                    bleManager.syncChannelsFromDevice()
+                    infoBanner = "Kanaele werden aus dem Funkgeraet geladen..."
+                }) {
+                    Text("Kanaele aus Geraet laden")
                 }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = channelAliasInput,
-                        onValueChange = { channelAliasInput = it },
-                        modifier = Modifier.weight(1f),
-                        label = { Text("Alias im Chat (z. B. Familie)") },
-                        singleLine = true
+                if (channels.isEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Noch keine Kanaele vom Geraet uebernommen. Bitte mit Funkgeraet verbinden und auf 'Kanaele aus Geraet laden' tippen.",
+                        fontSize = 13.sp,
+                        color = Color.Gray
                     )
-                    OutlinedTextField(
-                        value = channelPskInput,
-                        onValueChange = { channelPskInput = it },
-                        modifier = Modifier.weight(1f),
-                        label = { Text("PSK / Geheimwort") },
-                        singleLine = true
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {
-                        val idx = channelIndexText.toIntOrNull()
-                        if (idx != null && idx in 0..7 && channelNameInput.isNotBlank()) {
-                            bleManager.configureChannelOnDevice(idx, channelNameInput, channelPskInput)
-                            if (channelAliasInput.isNotBlank()) {
-                                bleManager.setChannelAlias(idx, channelAliasInput)
-                            }
-                            bleManager.toggleChannelAllowed(idx, true)
-                            infoBanner = "Kanal $idx (${channelAliasInput.ifBlank { channelNameInput }}) gespeichert und freigegeben."
-                        }
-                    }) {
-                        Text("Kanal speichern & freigeben")
-                    }
-                    OutlinedButton(onClick = { bleManager.syncChannels() }) {
-                        Text("Laden")
-                    }
                 }
             }
 
             items(channels) { channel ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(text = "Kanal ${channel.index}: ${channel.displayName}", fontWeight = FontWeight.Medium)
-                        Text(
-                            text = "Geraetename: ${channel.originalName} • ${if (channel.isEncryptedPskSet) "Schluessel aktiv" else "Kein PSK"}",
-                            fontSize = 12.sp,
-                            color = Color.Gray
+                var aliasField by remember(channel.index, channel.aliasName) {
+                    mutableStateOf(channel.aliasName)
+                }
+                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = "Kanal ${channel.index}: ${channel.displayName}", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = "Geraetekanal: ${channel.originalName} • ${if (channel.isEncryptedPskSet) "PSK im Geraet" else "Offen / kein PSK"}",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                        Switch(
+                            checked = channel.isAllowedForKid,
+                            onCheckedChange = { bleManager.toggleChannelAllowed(channel.index, it) }
                         )
                     }
-                    Switch(
-                        checked = channel.isAllowedForKid,
-                        onCheckedChange = { bleManager.toggleChannelAllowed(channel.index, it) }
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = aliasField,
+                            onValueChange = { aliasField = it },
+                            modifier = Modifier.weight(1f),
+                            placeholder = { Text("Alias (z. B. Familie)") },
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(onClick = {
+                            bleManager.setChannelAlias(channel.index, aliasField)
+                            infoBanner = "Alias fuer Kanal ${channel.index} gespeichert."
+                        }) {
+                            Text("Alias")
+                        }
+                    }
                 }
             }
 
