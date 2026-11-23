@@ -146,6 +146,9 @@ class MeshCoreBleManager(private val context: Context) {
     private val _contacts = MutableStateFlow<List<MeshContact>>(emptyList())
     val contacts: StateFlow<List<MeshContact>> = _contacts
 
+    private val _manualGroupAliases = MutableStateFlow<Map<String, String>>(loadManualGroupAliases())
+    val manualGroupAliases: StateFlow<Map<String, String>> = _manualGroupAliases
+
     private val _channels = MutableStateFlow<List<MeshChannel>>(loadCachedDeviceChannels())
     val channels: StateFlow<List<MeshChannel>> = _channels
 
@@ -647,6 +650,59 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+
+    private fun loadManualGroupAliases(): Map<String, String> {
+        val rawJson = prefs.getString("manual_group_aliases_json", null) ?: return emptyMap()
+        return try {
+            val obj = JSONObject(rawJson)
+            val map = LinkedHashMap<String, String>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = sanitizeText(keys.next()).take(48)
+                val v = sanitizeText(obj.optString(k, "")).take(24)
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    map[k] = v
+                }
+            }
+            map
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun saveManualGroupAliases(map: Map<String, String>) {
+        try {
+            val obj = JSONObject()
+            for ((k, v) in map) {
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    obj.put(k, v)
+                }
+            }
+            prefs.edit().putString("manual_group_aliases_json", obj.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    fun addOrUpdateManualGroupAlias(chatName: String, alias: String) {
+        val cleanChatName = sanitizeText(chatName).take(48)
+        val cleanAlias = sanitizeText(alias).take(24)
+        if (cleanChatName.isBlank() || cleanAlias.isBlank()) return
+        val updated = LinkedHashMap(_manualGroupAliases.value)
+        updated[cleanChatName] = cleanAlias
+        saveManualGroupAliases(updated)
+        _manualGroupAliases.value = updated
+        refreshExistingMessageSenderNames(_contacts.value, updated)
+    }
+
+    fun removeManualGroupAlias(chatName: String) {
+        if (!_manualGroupAliases.value.containsKey(chatName)) return
+        val updated = LinkedHashMap(_manualGroupAliases.value)
+        updated.remove(chatName)
+        saveManualGroupAliases(updated)
+        _manualGroupAliases.value = updated
+        refreshExistingMessageSenderNames(_contacts.value, updated)
+    }
+
     fun setContactAlias(prefixHex: String, alias: String) {
         val cleanAlias = sanitizeText(alias).take(24)
         prefs.edit().putString("contact_alias_$prefixHex", cleanAlias).apply()
@@ -657,11 +713,14 @@ class MeshCoreBleManager(private val context: Context) {
         refreshExistingMessageSenderNames(updatedContacts)
     }
 
-    private fun refreshExistingMessageSenderNames(currentContacts: List<MeshContact>) {
+    private fun refreshExistingMessageSenderNames(
+        currentContacts: List<MeshContact>,
+        currentManualAliases: Map<String, String> = _manualGroupAliases.value
+    ) {
         updateMessages { list ->
             list.map { msg ->
                 if (!msg.isFromMe && !msg.senderName.isNullOrBlank()) {
-                    val mapped = resolveContactName(msg.senderName, currentContacts)
+                    val mapped = resolveContactName(msg.senderName, currentContacts, currentManualAliases)
                     if (mapped != msg.senderName) msg.copy(senderName = mapped) else msg
                 } else msg
             }
@@ -825,7 +884,11 @@ class MeshCoreBleManager(private val context: Context) {
         return null to rawPayload.trim()
     }
 
-    private fun resolveContactName(rawSender: String, contactsList: List<MeshContact>): String {
+    private fun resolveContactName(
+        rawSender: String,
+        contactsList: List<MeshContact>,
+        manualAliases: Map<String, String> = _manualGroupAliases.value
+    ): String {
         val trimmedSender = rawSender.trim()
         val cleanedSender = stripLeadingK(trimmedSender)
 
@@ -833,6 +896,15 @@ class MeshCoreBleManager(private val context: Context) {
             .map { it.lowercase() }
             .filter { it.isNotEmpty() }
             .distinct()
+
+        for ((rawChatName, rawManualAlias) in manualAliases) {
+            val chatClean = stripLeadingK(rawChatName.trim()).lowercase()
+            val chatRawLower = rawChatName.trim().lowercase()
+            val aliasVal = rawManualAlias.trim()
+            if (aliasVal.isNotEmpty() && candidates.any { it == chatRawLower || (chatClean.isNotEmpty() && it == chatClean) }) {
+                return aliasVal
+            }
+        }
 
         for (c in contactsList) {
             val aliasRaw = c.aliasName.trim()

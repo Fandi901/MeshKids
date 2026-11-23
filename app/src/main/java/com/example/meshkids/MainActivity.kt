@@ -520,6 +520,9 @@ fun ParentSettingsScreen(
     val channels by bleManager.channels.collectAsState()
     val connectionState by bleManager.connectionState.collectAsState()
 
+    val manualGroupAliases by bleManager.manualGroupAliases.collectAsState()
+    var manualChatName by remember { mutableStateOf("") }
+    var manualAliasName by remember { mutableStateOf("") }
     var kidName by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
 
@@ -626,6 +629,60 @@ fun ParentSettingsScreen(
                         }) {
                             Text("Alias")
                         }
+                    }
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text("Zusaetzliche Alias-Namen nur fuer Gruppenchats (ohne Geraete-Kontakt)", fontWeight = FontWeight.SemiBold)
+                Text("Falls ein Absender aus dem Chat nicht in der Geraete-Kontaktliste steht, hier Namen aus dem Chat und Alias eintragen.", fontSize = 12.sp, color = Color.Gray)
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = manualChatName,
+                    onValueChange = { if (it.length <= 48) manualChatName = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Name aus dem Chat (z. B. NW-E-4711)") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = manualAliasName,
+                        onValueChange = { if (it.length <= 24) manualAliasName = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("Gewuenschter Alias (z. B. Dieter)") },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = {
+                        if (manualChatName.isNotBlank() && manualAliasName.isNotBlank()) {
+                            bleManager.addOrUpdateManualGroupAlias(manualChatName, manualAliasName)
+                            infoBanner = "Gruppen-Alias '${manualAliasName.trim()}' fuer '${manualChatName.trim()}' gespeichert."
+                            manualChatName = ""
+                            manualAliasName = ""
+                        }
+                    }) {
+                        Text("Hinzufuegen")
+                    }
+                }
+            }
+
+            items(manualGroupAliases.entries.toList(), key = { "manual_${it.key}" }) { entry ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = entry.value, fontWeight = FontWeight.SemiBold)
+                        Text(text = "Chat-Name: ${entry.key}", fontSize = 12.sp, color = Color.Gray)
+                    }
+                    TextButton(onClick = {
+                        bleManager.removeManualGroupAlias(entry.key)
+                        infoBanner = "Gruppen-Alias fuer '${entry.key}' entfernt."
+                    }) {
+                        Text("Loeschen")
                     }
                 }
             }
