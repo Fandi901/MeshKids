@@ -808,11 +808,19 @@ class MeshCoreBleManager(private val context: Context) {
     // Resolves sender name in group chat using known contacts (preferring alias) and removing leading 'k' prefix.
     // Example: incoming sender "kOnkel" where contact has originalName="Onkel" and aliasName="Papa" -> "Papa".
     private fun resolveGroupSenderAndBody(rawPayload: String): Pair<String?, String> {
-        val colonIdx = rawPayload.indexOf(": ")
-        if (colonIdx > 0 && colonIdx < 40) {
-            val rawSender = rawPayload.substring(0, colonIdx).trim()
-            val body = rawPayload.substring(colonIdx + 2).trim()
+        val colonSpaceIdx = rawPayload.indexOf(": ")
+        if (colonSpaceIdx in 1..47) {
+            val rawSender = rawPayload.substring(0, colonSpaceIdx).trim()
+            val body = rawPayload.substring(colonSpaceIdx + 2).trim()
             return resolveContactName(rawSender, _contacts.value) to body
+        }
+        val colonIdx = rawPayload.indexOf(":")
+        if (colonIdx in 1..47) {
+            val rawSender = rawPayload.substring(0, colonIdx).trim()
+            val body = rawPayload.substring(colonIdx + 1).trim()
+            if (body.isNotEmpty()) {
+                return resolveContactName(rawSender, _contacts.value) to body
+            }
         }
         return null to rawPayload.trim()
     }
@@ -842,7 +850,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
 
             if (matchesContact) {
-                val chosen = if (aliasClean.isNotEmpty()) aliasClean else origClean
+                val chosen = if (aliasRaw.isNotEmpty()) aliasRaw else origClean
                 if (chosen.isNotEmpty()) return chosen
             }
         }

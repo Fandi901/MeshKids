@@ -326,7 +326,7 @@ fun KidTargetListScreen(
                                 }
                             }
                             Text(
-                                text = lastMsg?.text ?: if (isGroup) "Familien-Gruppenchat" else "Tippe hier zum Schreiben!",
+                                text = lastMsg?.text ?: if (isGroup) "Gruppenchat" else "Tippe hier zum Schreiben!",
                                 fontSize = 15.sp,
                                 fontWeight = if (isUnread) FontWeight.SemiBold else FontWeight.Normal,
                                 color = if (isUnread) Color.Black else Color.Gray,
