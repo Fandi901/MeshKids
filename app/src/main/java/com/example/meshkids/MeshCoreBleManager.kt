@@ -108,6 +108,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CMD_SET_ADVERT_NAME: Byte = 0x08
         const val CMD_SYNC_NEXT_MESSAGE: Byte = 0x0A
         const val CMD_GET_CHANNEL: Byte = 0x1F
+        const val CMD_SET_FLOOD_SCOPE: Byte = 0x22
         const val CMD_SET_FLOOD_SCOPE_KEY: Byte = 0x36
 
         const val RESP_CONTACT: Byte = 0x03
@@ -785,11 +786,17 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun applyChannelFloodScope(regionScope: String) {
-        val key16 = deriveFloodScopeKey16(regionScope)
-        val cmd = ByteArray(1 + 16)
-        cmd[0] = CMD_SET_FLOOD_SCOPE_KEY
-        System.arraycopy(key16, 0, cmd, 1, 16)
-        enqueueCommand(cmd)
+        val cleanRegion = sanitizeText(regionScope).removePrefix("#").trim().lowercase().take(31)
+        if (cleanRegion.isEmpty()) return
+
+        // MeshCore companion protocol CMD_SET_FLOOD_SCOPE (0x22):
+        // Sends the region name (e.g. "de-nw") directly so the firmware resolves the
+        // region from its own region table instead of guessing a local hash.
+        val scopeBytes = cleanRegion.toByteArray(Charsets.UTF_8)
+        val cmdScope = ByteArray(1 + scopeBytes.size)
+        cmdScope[0] = CMD_SET_FLOOD_SCOPE
+        System.arraycopy(scopeBytes, 0, cmdScope, 1, scopeBytes.size)
+        enqueueCommand(cmdScope)
     }
 
     fun setChannelRegionScope(channelIndex: Int, regionScope: String) {
