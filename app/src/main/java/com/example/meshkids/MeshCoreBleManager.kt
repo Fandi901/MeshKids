@@ -614,9 +614,10 @@ class MeshCoreBleManager(private val context: Context) {
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             isWriting = false
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                awaitingCommandAck = false
-                ackTimeoutJob?.cancel()
+            awaitingCommandAck = false
+            ackTimeoutJob?.cancel()
+            scope.launch {
+                delay(60L)
                 processNextCommand()
             }
         }
@@ -946,7 +947,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private fun processNextCommand() {
-        if (isWriting || awaitingCommandAck) return
+        if (isWriting) return
         val next = commandQueue.poll() ?: return
         val rx = rxCharacteristic ?: return
         val gatt = bluetoothGatt ?: return
@@ -964,9 +965,10 @@ class MeshCoreBleManager(private val context: Context) {
             }
             ackTimeoutJob?.cancel()
             ackTimeoutJob = scope.launch {
-                delay(450L)
+                delay(180L)
                 if (awaitingCommandAck) {
                     awaitingCommandAck = false
+                    isWriting = false
                     processNextCommand()
                 }
             }
