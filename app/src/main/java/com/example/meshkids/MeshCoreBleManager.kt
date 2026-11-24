@@ -877,18 +877,7 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(channel.index.toByte())
                 buffer.putInt(epochSec)
                 buffer.put(textBytes)
-                val channelPacket = buffer.array()
-
-                val customScope = sanitizeText(channel.regionScope).trim()
-                if (customScope.isNotEmpty()) {
-                    applyChannelFloodScope(customScope)
-                    scope.launch {
-                        delay(150L)
-                        enqueueCommand(channelPacket)
-                    }
-                } else {
-                    enqueueCommand(channelPacket)
-                }
+                enqueueCommand(buffer.array())
 
                 updateMessages { list ->
                     list + ChatMessage(
