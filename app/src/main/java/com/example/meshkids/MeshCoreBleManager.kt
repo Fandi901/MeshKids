@@ -135,6 +135,8 @@ class MeshCoreBleManager(private val context: Context) {
 
     private val commandQueue = ConcurrentLinkedQueue<ByteArray>()
     private var isWriting = false
+    private var awaitingCommandAck = false
+    private var ackTimeoutJob: Job? = null
 
     private val prefs = context.getSharedPreferences("meshkids_prefs", Context.MODE_PRIVATE)
 
@@ -612,7 +614,11 @@ class MeshCoreBleManager(private val context: Context) {
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             isWriting = false
-            processNextCommand()
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                awaitingCommandAck = false
+                ackTimeoutJob?.cancel()
+                processNextCommand()
+            }
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
@@ -747,14 +753,13 @@ class MeshCoreBleManager(private val context: Context) {
         if (clean.isEmpty()) {
             return ByteArray(16)
         }
-        val scopedName = "#$clean"
         return try {
             val digest = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(scopedName.toByteArray(Charsets.UTF_8))
+                .digest(clean.toByteArray(Charsets.UTF_8))
             digest.copyOfRange(0, 16)
         } catch (_: Exception) {
             val out = ByteArray(16)
-            val raw = scopedName.toByteArray(Charsets.UTF_8)
+            val raw = clean.toByteArray(Charsets.UTF_8)
             System.arraycopy(raw, 0, out, 0, minOf(raw.size, 16))
             out
         }
@@ -922,19 +927,42 @@ class MeshCoreBleManager(private val context: Context) {
         processNextCommand()
     }
 
+    private fun releaseCommandLockAndContinue() {
+        ackTimeoutJob?.cancel()
+        ackTimeoutJob = null
+        awaitingCommandAck = false
+        isWriting = false
+        processNextCommand()
+    }
+
     private fun processNextCommand() {
-        if (isWriting) return
+        if (isWriting || awaitingCommandAck) return
         val next = commandQueue.poll() ?: return
         val rx = rxCharacteristic ?: return
         val gatt = bluetoothGatt ?: return
 
         isWriting = true
+        awaitingCommandAck = true
         rx.value = next
         rx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         try {
-            gatt.writeCharacteristic(rx)
+            val started = gatt.writeCharacteristic(rx)
+            if (!started) {
+                isWriting = false
+                awaitingCommandAck = false
+                return
+            }
+            ackTimeoutJob?.cancel()
+            ackTimeoutJob = scope.launch {
+                delay(450L)
+                if (awaitingCommandAck) {
+                    awaitingCommandAck = false
+                    processNextCommand()
+                }
+            }
         } catch (_: Exception) {
             isWriting = false
+            awaitingCommandAck = false
         }
     }
 
@@ -1014,7 +1042,16 @@ class MeshCoreBleManager(private val context: Context) {
 
     private fun handleIncomingFrame(frame: ByteArray) {
         if (frame.isEmpty()) return
-        when (frame[0]) {
+        val opcode = frame[0]
+        if (opcode == 0x00.toByte() || opcode == 0x01.toByte() || opcode == 0x05.toByte() ||
+            opcode == 0x06.toByte() || opcode == 0x08.toByte() || opcode == 0x09.toByte() ||
+            opcode == 0x0B.toByte() || opcode == 0x12.toByte() || opcode == 0x80.toByte() ||
+            opcode == 0x82.toByte() || opcode == 0x83.toByte() || opcode == 0x84.toByte() ||
+            opcode == 0x88.toByte() || opcode == 0x89.toByte()
+        ) {
+            releaseCommandLockAndContinue()
+        }
+        when (opcode) {
             // System frames -> never trigger message notification sound or unread blink
             PUSH_SEND_CONFIRMED -> {
                 val ackTag = if (frame.size >= 5) {
