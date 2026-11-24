@@ -25,8 +25,6 @@ import java.nio.ByteOrder
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 
-typealias GroupAliasMap = Map<String, String>
-
 enum class DeliveryStatus {
     SENDING,
     DELIVERED,
@@ -154,8 +152,8 @@ class MeshCoreBleManager(private val context: Context) {
     private val _contacts = MutableStateFlow<List<MeshContact>>(emptyList())
     val contacts: StateFlow<List<MeshContact>> = _contacts
 
-    private val _manualGroupAliases = MutableStateFlow(loadManualGroupAliases())
-    val manualGroupAliases: StateFlow<GroupAliasMap> = _manualGroupAliases
+    private val _manualGroupAliases = MutableStateFlow<Map<String, String>>(loadManualGroupAliases())
+    val manualGroupAliases: StateFlow<Map<String, String>> = _manualGroupAliases
 
     private val _channels = MutableStateFlow<List<MeshChannel>>(loadCachedDeviceChannels())
     val channels: StateFlow<List<MeshChannel>> = _channels
@@ -226,6 +224,7 @@ class MeshCoreBleManager(private val context: Context) {
         _quickReplies.value = cleaned
     }
 
+    // Keep at most MAX_MESSAGES_PER_TARGET (20) messages per chat target and persist them.
     private fun trimAndPersistMessages(rawList: List<ChatMessage>): List<ChatMessage> {
         val countsByTarget = mutableMapOf<String, Int>()
         val keptReversed = ArrayList<ChatMessage>(rawList.size)
@@ -286,6 +285,7 @@ class MeshCoreBleManager(private val context: Context) {
                 } catch (_: Exception) {
                     if (isFromMe) DeliveryStatus.DELIVERED else DeliveryStatus.DELIVERED
                 }
+                // Any in-flight SENDING message from a previous process should not stay stuck forever on restart
                 val normalizedStatus = if (status == DeliveryStatus.SENDING) DeliveryStatus.FAILED else status
                 val ackTag = if (obj.isNull("expectedAckTag")) null else obj.optInt("expectedAckTag", 0).takeIf { it != 0 }
                 val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
@@ -364,6 +364,8 @@ class MeshCoreBleManager(private val context: Context) {
         playNewMessageNotificationSound()
     }
 
+    // Plays notification sound strictly for newly received chat messages (never for system frames).
+    // Uses MediaPlayer with fallback to RingtoneManager so playback works reliably on BLE/IO threads.
     private fun playNewMessageNotificationSound() {
         scope.launch(Dispatchers.Main) {
             try {
@@ -661,7 +663,8 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    private fun loadManualGroupAliases(): GroupAliasMap {
+
+    private fun loadManualGroupAliases(): Map<String, String> {
         val rawJson = prefs.getString("manual_group_aliases_json", null) ?: return emptyMap()
         return try {
             val obj = JSONObject(rawJson)
@@ -680,7 +683,7 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    private fun saveManualGroupAliases(map: GroupAliasMap) {
+    private fun saveManualGroupAliases(map: Map<String, String>) {
         try {
             val obj = JSONObject()
             for ((k, v) in map) {
@@ -725,7 +728,7 @@ class MeshCoreBleManager(private val context: Context) {
 
     private fun refreshExistingMessageSenderNames(
         currentContacts: List<MeshContact>,
-        currentManualAliases: GroupAliasMap = _manualGroupAliases.value
+        currentManualAliases: Map<String, String> = _manualGroupAliases.value
     ) {
         updateMessages { list ->
             list.map { msg ->
@@ -744,6 +747,7 @@ class MeshCoreBleManager(private val context: Context) {
             if (it.index == channelIndex) it.copy(aliasName = cleanAlias) else it
         }
     }
+
 
     private fun parseHex16OrNull(input: String): ByteArray? {
         val hex = input.trim().removePrefix("0x").removePrefix("0X")
@@ -829,6 +833,7 @@ class MeshCoreBleManager(private val context: Context) {
                     return buffer.array()
                 }
 
+                // Attempt 1 (immediate)
                 enqueueCommand(buildDirectPacket(epochSec))
 
                 updateMessages { list ->
@@ -863,6 +868,7 @@ class MeshCoreBleManager(private val context: Context) {
                             enqueueCommand(buildDirectPacket(retryEpochSec))
                         }
 
+                        // Wait 2 minutes after the 3rd attempt before marking permanently FAILED
                         delay(RETRY_INTERVAL_MS)
                         updateMessages { list ->
                             list.map { m ->
@@ -957,10 +963,17 @@ class MeshCoreBleManager(private val context: Context) {
 
         isWriting = true
         awaitingCommandAck = true
-        rx.value = next
-        rx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         try {
-            val started = gatt.writeCharacteristic(rx)
+            val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(rx, next, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                rx.value = next
+                rx.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(rx)
+            }
             if (!started) {
                 isWriting = false
                 awaitingCommandAck = false
@@ -968,7 +981,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
             ackTimeoutJob?.cancel()
             ackTimeoutJob = scope.launch {
-                delay(180L)
+                delay(250L)
                 if (awaitingCommandAck) {
                     awaitingCommandAck = false
                     isWriting = false
@@ -981,6 +994,8 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+    // Resolves sender name in group chat using known contacts (preferring alias) and removing leading 'k' prefix.
+    // Example: incoming sender "kOnkel" where contact has originalName="Onkel" and aliasName="Papa" -> "Papa".
     private fun resolveGroupSenderAndBody(rawPayload: String): Pair<String?, String> {
         val colonSpaceIdx = rawPayload.indexOf(": ")
         if (colonSpaceIdx in 1..47) {
@@ -1002,7 +1017,7 @@ class MeshCoreBleManager(private val context: Context) {
     private fun resolveContactName(
         rawSender: String,
         contactsList: List<MeshContact>,
-        manualAliases: GroupAliasMap = _manualGroupAliases.value
+        manualAliases: Map<String, String> = _manualGroupAliases.value
     ): String {
         val trimmedSender = rawSender.trim()
         val cleanedSender = stripLeadingK(trimmedSender)
@@ -1065,6 +1080,7 @@ class MeshCoreBleManager(private val context: Context) {
             releaseCommandLockAndContinue()
         }
         when (opcode) {
+            // System frames -> never trigger message notification sound or unread blink
             PUSH_SEND_CONFIRMED -> {
                 val ackTag = if (frame.size >= 5) {
                     ByteBuffer.wrap(frame, 1, 4).order(ByteOrder.LITTLE_ENDIAN).int and 0x7FFFFFFF
@@ -1157,9 +1173,11 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+
     private fun extractEpochMs(frame: ByteArray, offset: Int): Long {
         if (offset < 0 || offset + 4 > frame.size) return System.currentTimeMillis()
         val sec = ByteBuffer.wrap(frame, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
+        // Reasonable Unix epoch check (after year 2020 and not far in future)
         return if (sec in 1_577_836_800L..4_102_444_800L) sec * 1000L else System.currentTimeMillis()
     }
 

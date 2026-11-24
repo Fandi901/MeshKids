@@ -137,8 +137,9 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     LaunchedEffect(selectedTarget?.id) {
         selectedTarget?.let { target ->
             bleManager.markTargetRead(target.id)
-            if (target.type == ChatTargetType.CHANNEL) {
-                bleManager.applyChannelFloodScope(target.channel?.regionScope.orEmpty())
+            val channelScope = target.channel?.regionScope?.trim().orEmpty()
+            if (target.type == ChatTargetType.CHANNEL && channelScope.isNotEmpty()) {
+                bleManager.applyChannelFloodScope(channelScope)
             }
         }
     }
@@ -237,6 +238,7 @@ fun KidTargetListScreen(
     alertCounter: Long,
     onSelectTarget: (ChatTarget) -> Unit
 ) {
+    // Explicit discrete blinking loop whenever unreadTargetIds is non-empty or a new message arrives
     var blinkPhase by remember { mutableStateOf(false) }
     LaunchedEffect(unreadTargetIds, alertCounter) {
         if (unreadTargetIds.isEmpty()) {
