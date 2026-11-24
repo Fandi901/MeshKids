@@ -370,3 +370,242 @@ class MeshCoreBleManager(private val context: Context) {
         scope.launch(Dispatchers.Main) {
             try {
                 activeMediaPlayer?.stop()
+                activeMediaPlayer?.release()
+                activeMediaPlayer = null
+
+                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                    ?: return@launch
+
+                val mp = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                    setDataSource(context.applicationContext, uri)
+                    setOnCompletionListener { player ->
+                        try {
+                            player.release()
+                        } catch (_: Exception) {
+                        }
+                        if (activeMediaPlayer === player) {
+                            activeMediaPlayer = null
+                        }
+                    }
+                    prepare()
+                    start()
+                }
+                activeMediaPlayer = mp
+            } catch (_: Exception) {
+                try {
+                    val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION) ?: return@launch
+                    RingtoneManager.getRingtone(context.applicationContext, uri)?.play()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    fun autoConnectIfSaved() {
+        if (manualDisconnect) return
+        val savedAddress = prefs.getString("saved_mac", null) ?: return
+        if (_isConnected.value && bluetoothGatt != null) return
+        scheduleReconnect(immediate = true)
+    }
+
+    fun scheduleReconnect(immediate: Boolean = false) {
+        if (manualDisconnect) return
+        if (prefs.getString("saved_mac", null) == null) return
+        if (immediate && !_isConnected.value) {
+            isConnecting = false
+            scope.launch { attemptReconnectOnce() }
+        }
+        startReconnectWatchdog()
+    }
+
+    private fun startReconnectWatchdog() {
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = scope.launch {
+            while (isActive) {
+                delay(RECONNECT_INTERVAL_MS)
+                if (manualDisconnect) continue
+                val savedAddress = prefs.getString("saved_mac", null) ?: continue
+                if (_isConnected.value) {
+                    isConnecting = false
+                    continue
+                }
+                if (isConnecting && (System.currentTimeMillis() - connectAttemptStartedAtMs) > 10_000L) {
+                    isConnecting = false
+                }
+                if (!isConnecting) {
+                    attemptReconnectOnce(savedAddress)
+                }
+            }
+        }
+    }
+
+    private suspend fun attemptReconnectOnce(addressOverride: String? = null) {
+        if (manualDisconnect || _isConnected.value || isConnecting) return
+        val savedAddress = addressOverride ?: prefs.getString("saved_mac", null) ?: return
+        val adapter = bluetoothAdapter ?: return
+        if (!adapter.isEnabled) {
+            _connectionState.value = "Bluetooth aus – warte..."
+            return
+        }
+
+        isConnecting = true
+        connectAttemptStartedAtMs = System.currentTimeMillis()
+        _connectionState.value = "Verbinde automatisch neu..."
+        try {
+            val device = adapter.getRemoteDevice(savedAddress)
+            withContext(Dispatchers.Main) {
+                try {
+                    bluetoothGatt?.close()
+                } catch (_: Exception) {
+                }
+                bluetoothGatt = null
+                rxCharacteristic = null
+                isWriting = false
+                bluetoothGatt = device.connectGatt(
+                    context,
+                    false,
+                    gattCallback,
+                    BluetoothDevice.TRANSPORT_LE
+                )
+            }
+        } catch (_: Exception) {
+            isConnecting = false
+        }
+    }
+
+    fun startScan() {
+        val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
+        _discoveredDevices.value = emptyList()
+        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+        scanner.startScan(listOf(filter), settings, scanCallback)
+        scope.launch {
+            delay(8000)
+            stopScan()
+        }
+    }
+
+    fun stopScan() {
+        try {
+            bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
+        } catch (_: Exception) {
+        }
+    }
+
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val device = result.device
+            if (_discoveredDevices.value.none { it.address == device.address }) {
+                _discoveredDevices.value = _discoveredDevices.value + device
+            }
+        }
+    }
+
+    fun connectToDevice(device: BluetoothDevice) {
+        stopScan()
+        manualDisconnect = false
+        isConnecting = true
+        connectAttemptStartedAtMs = System.currentTimeMillis()
+        _connectionState.value = "Verbinde..."
+        prefs.edit().putString("saved_mac", device.address).apply()
+        scope.launch(Dispatchers.Main) {
+            try {
+                bluetoothGatt?.close()
+            } catch (_: Exception) {
+            }
+            bluetoothGatt = null
+            rxCharacteristic = null
+            isWriting = false
+            bluetoothGatt = device.connectGatt(
+                context,
+                false,
+                gattCallback,
+                BluetoothDevice.TRANSPORT_LE
+            )
+        }
+    }
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                isConnecting = false
+                _connectionState.value = "Suche Dienste..."
+                scope.launch(Dispatchers.Main) {
+                    delay(200)
+                    try {
+                        if (!gatt.requestMtu(185)) {
+                            gatt.discoverServices()
+                        }
+                    } catch (_: Exception) {
+                        gatt.discoverServices()
+                    }
+                }
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                isConnecting = false
+                _isConnected.value = false
+                rxCharacteristic = null
+                isWriting = false
+                commandQueue.clear()
+                try {
+                    gatt.close()
+                } catch (_: Exception) {
+                }
+                if (bluetoothGatt == gatt) {
+                    bluetoothGatt = null
+                }
+                if (!manualDisconnect && prefs.getString("saved_mac", null) != null) {
+                    _connectionState.value = "Verbindung unterbrochen – stelle wieder her..."
+                    scheduleReconnect(immediate = false)
+                } else {
+                    _connectionState.value = "Getrennt"
+                }
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            gatt.discoverServices()
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                try { gatt.disconnect() } catch (_: Exception) {}
+                return
+            }
+            val service = gatt.getService(SERVICE_UUID) ?: run {
+                try { gatt.disconnect() } catch (_: Exception) {}
+                return
+            }
+            rxCharacteristic = service.getCharacteristic(RX_CHAR_UUID)
+            val txCharacteristic = service.getCharacteristic(TX_CHAR_UUID)
+
+            if (txCharacteristic != null) {
+                gatt.setCharacteristicNotification(txCharacteristic, true)
+                val descriptor = txCharacteristic.getDescriptor(CCCD_UUID)
+                if (descriptor != null) {
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    gatt.writeDescriptor(descriptor)
+                } else {
+                    isConnecting = false
+                    _isConnected.value = true
+                    _connectionState.value = "Verbunden"
+                    initializeMeshCoreSession()
+                }
+            } else {
+                isConnecting = false
+                _isConnected.value = true
+                _connectionState.value = "Verbunden"
+                initializeMeshCoreSession()
+            }
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            isConnecting = false
+            _isConnected.value = true
+            _connectionState.value = "Verbunden"
