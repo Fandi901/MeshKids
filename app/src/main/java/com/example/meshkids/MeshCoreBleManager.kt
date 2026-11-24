@@ -91,7 +91,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "1.3"
+        const val APP_VERSION: String = "1.4"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -881,6 +881,9 @@ class MeshCoreBleManager(private val context: Context) {
                     return buffer.array()
                 }
 
+                val initialHashes = buildCandidateAckHashes(epochSec, textBytes, contact.pubKeyPrefixBytes)
+                registerDirectAckCandidates(msgId, initialHashes + ackTag)
+
                 // Attempt 1 (immediate)
                 enqueueCommand(buildDirectPacket(epochSec))
 
@@ -906,6 +909,8 @@ class MeshCoreBleManager(private val context: Context) {
                             }
                             val retryEpochSec = (System.currentTimeMillis() / 1000L).toInt()
                             val retryAckTag = (retryEpochSec and 0x7FFFFFFF)
+                            val retryHashes = buildCandidateAckHashes(retryEpochSec, textBytes, contact.pubKeyPrefixBytes)
+                            registerDirectAckCandidates(msgId, retryHashes + retryAckTag)
                             updateMessages { list ->
                                 list.map { m ->
                                     if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
@@ -918,6 +923,7 @@ class MeshCoreBleManager(private val context: Context) {
 
                         // Wait 2 minutes after the 3rd attempt before marking permanently FAILED
                         delay(RETRY_INTERVAL_MS)
+                        clearDirectAckCandidates(msgId)
                         updateMessages { list ->
                             list.map { m ->
                                 if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
@@ -1018,31 +1024,68 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+    private val directAckCandidatesByMsgId = java.util.concurrent.ConcurrentHashMap<String, MutableSet<Int>>()
+
+    private fun registerDirectAckCandidates(msgId: String, hashes: Collection<Int>) {
+        val set = directAckCandidatesByMsgId.computeIfAbsent(msgId) {
+            java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+        }
+        hashes.filter { it != 0 }.forEach { set.add(it) }
+    }
+
+    private fun clearDirectAckCandidates(msgId: String) {
+        directAckCandidatesByMsgId.remove(msgId)
+    }
+
+    private fun computeAckHashInt(
+        timestampSec: Int,
+        attempt: Int,
+        textBytes: ByteArray,
+        pubKeyPrefixBytes: ByteArray
+    ): Int {
+        return try {
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            val tsBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(timestampSec).array()
+            md.update(tsBuf)
+            md.update(attempt.toByte())
+            md.update(textBytes)
+            md.update(pubKeyPrefixBytes)
+            val digest = md.digest()
+            ByteBuffer.wrap(digest, 0, 4).order(ByteOrder.LITTLE_ENDIAN).int and 0x7FFFFFFF
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    private fun buildCandidateAckHashes(
+        timestampSec: Int,
+        textBytes: ByteArray,
+        pubKeyPrefixBytes: ByteArray
+    ): List<Int> {
+        return (0..3).map { att ->
+            computeAckHashInt(timestampSec, att, textBytes, pubKeyPrefixBytes)
+        }.filter { it != 0 }.distinct()
+    }
+
     private fun markDirectMessageDelivered(ackTag: Int?) {
         val currentList = _messages.value
         val exactMatchIdx = if (ackTag != null && ackTag != 0) {
-            currentList.indexOfFirst {
-                it.isFromMe &&
-                    it.deliveryStatus == DeliveryStatus.SENDING &&
-                    it.expectedAckTag == ackTag
+            currentList.indexOfFirst { msg ->
+                if (!msg.isFromMe || msg.deliveryStatus != DeliveryStatus.SENDING) return@indexOfFirst false
+                val candidates = directAckCandidatesByMsgId[msg.id]
+                (candidates != null && candidates.contains(ackTag)) || (msg.expectedAckTag == ackTag)
             }
         } else -1
 
-        val targetIdx = if (exactMatchIdx >= 0) {
-            exactMatchIdx
-        } else {
-            currentList.indexOfFirst {
-                it.isFromMe && it.deliveryStatus == DeliveryStatus.SENDING
-            }
-        }
-
-        if (targetIdx < 0) return
-        val confirmedMsgId = currentList[targetIdx].id
+        // Only confirm the message matching the ACK hash; never fall back to an unrelated pending message.
+        if (exactMatchIdx < 0) return
+        val confirmedMsgId = currentList[exactMatchIdx].id
+        clearDirectAckCandidates(confirmedMsgId)
         activeSendJobs.remove(confirmedMsgId)?.cancel()
 
         updateMessages { list ->
             list.mapIndexed { idx, msg ->
-                if (idx == targetIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
+                if (idx == exactMatchIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
             }
         }
     }
