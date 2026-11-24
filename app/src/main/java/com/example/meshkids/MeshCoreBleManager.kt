@@ -625,7 +625,7 @@ class MeshCoreBleManager(private val context: Context) {
     private fun initializeMeshCoreSession() {
         val appStart = ByteBuffer.allocate(8).apply {
             put(CMD_APP_START)
-            put(0x03)
+            put(0x08)
             put(ByteArray(6))
         }.array()
         enqueueCommand(appStart)
@@ -743,17 +743,18 @@ class MeshCoreBleManager(private val context: Context) {
 
 
     private fun deriveFloodScopeKey16(regionScope: String): ByteArray {
-        val clean = sanitizeText(regionScope).trim().lowercase()
+        val clean = sanitizeText(regionScope).trim().lowercase().removePrefix("#")
         if (clean.isEmpty()) {
             return ByteArray(16)
         }
+        val scopedName = "#$clean"
         return try {
             val digest = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(clean.toByteArray(Charsets.UTF_8))
+                .digest(scopedName.toByteArray(Charsets.UTF_8))
             digest.copyOfRange(0, 16)
         } catch (_: Exception) {
             val out = ByteArray(16)
-            val raw = clean.toByteArray(Charsets.UTF_8)
+            val raw = scopedName.toByteArray(Charsets.UTF_8)
             System.arraycopy(raw, 0, out, 0, minOf(raw.size, 16))
             out
         }
