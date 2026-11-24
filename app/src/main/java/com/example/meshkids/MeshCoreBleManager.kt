@@ -23,13 +23,15 @@ import kotlinx.coroutines.flow.StateFlow
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ConcurrentLinkedDeque
 
 enum class DeliveryStatus {
     SENDING,
     DELIVERED,
     FAILED,
-    GROUP_SENT
+    GROUP_SENT,
+    GROUP_WAITING_REPEATER,
+    GROUP_REPEATER_HEARD
 }
 
 data class MeshContact(
@@ -85,7 +87,11 @@ class MeshCoreBleManager(private val context: Context) {
     companion object {
         const val RETRY_INTERVAL_MS: Long = 120_000L
         const val MAX_SEND_ATTEMPTS: Int = 3
+        const val GROUP_REPEATER_WAIT_MS: Long = 30_000L
+        const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
+        const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
+        const val APP_VERSION: String = "1.2"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -119,6 +125,7 @@ class MeshCoreBleManager(private val context: Context) {
 
         const val PUSH_SEND_CONFIRMED: Byte = 0x82.toByte()
         const val PUSH_MSG_WAITING: Byte = 0x83.toByte()
+        const val PUSH_LOG_RX_DATA: Byte = 0x88.toByte()
     }
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -128,12 +135,26 @@ class MeshCoreBleManager(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeSendJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val pendingGroupEchoes = java.util.concurrent.ConcurrentHashMap<String, PendingGroupEcho>()
+    @Volatile
+    private var lastChannelTxScheduledAtMs: Long = 0L
     private var reconnectJob: Job? = null
+
+    private data class PendingGroupEcho(
+        val msgId: String,
+        val channelIndex: Int,
+        val text: String,
+        val createdAtMs: Long
+    )
     private var manualDisconnect = false
     private var isConnecting = false
     private var connectAttemptStartedAtMs = 0L
 
-    private val commandQueue = ConcurrentLinkedQueue<ByteArray>()
+    private val commandQueue = ConcurrentLinkedDeque<ByteArray>()
+    @Volatile
+    private var lastWrittenCommand: ByteArray? = null
+    @Volatile
+    private var lastWriteRetried: Boolean = false
     private var isWriting = false
     private var awaitingCommandAck = false
     private var ackTimeoutJob: Job? = null
@@ -286,7 +307,11 @@ class MeshCoreBleManager(private val context: Context) {
                     if (isFromMe) DeliveryStatus.DELIVERED else DeliveryStatus.DELIVERED
                 }
                 // Any in-flight SENDING message from a previous process should not stay stuck forever on restart
-                val normalizedStatus = if (status == DeliveryStatus.SENDING) DeliveryStatus.FAILED else status
+                val normalizedStatus = when (status) {
+                    DeliveryStatus.SENDING -> DeliveryStatus.FAILED
+                    DeliveryStatus.GROUP_WAITING_REPEATER -> DeliveryStatus.GROUP_SENT
+                    else -> status
+                }
                 val ackTag = if (obj.isNull("expectedAckTag")) null else obj.optInt("expectedAckTag", 0).takeIf { it != 0 }
                 val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
                 parsed.add(
@@ -613,11 +638,27 @@ class MeshCoreBleManager(private val context: Context) {
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            val finishedCmd = lastWrittenCommand
             isWriting = false
             awaitingCommandAck = false
             ackTimeoutJob?.cancel()
+            if (status != BluetoothGatt.GATT_SUCCESS && finishedCmd != null && !lastWriteRetried) {
+                lastWriteRetried = true
+                commandQueue.addFirst(finishedCmd)
+                scope.launch {
+                    delay(180L)
+                    processNextCommand()
+                }
+                return
+            }
+            lastWriteRetried = false
+            val postWriteDelay = if (finishedCmd != null && finishedCmd.isNotEmpty() && finishedCmd[0] == CMD_SET_FLOOD_SCOPE) {
+                SCOPE_TO_MSG_GAP_MS
+            } else {
+                90L
+            }
             scope.launch {
-                delay(60L)
+                delay(postWriteDelay)
                 processNextCommand()
             }
         }
@@ -893,20 +934,23 @@ class MeshCoreBleManager(private val context: Context) {
 
             ChatTargetType.CHANNEL -> {
                 val channel = target.channel ?: return
-                val scopeCmd = buildFloodScopePacket(channel.regionScope)
-
                 val textBytes = cleanText.toByteArray(Charsets.UTF_8)
-                val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
-                buffer.put(CMD_SEND_CHANNEL_TXT_MSG)
-                buffer.put(0x00)
-                buffer.put(channel.index.toByte())
-                buffer.putInt(epochSec)
-                buffer.put(textBytes)
 
-                // Apply this channel's flood scope (or 16 zero bytes to clear when empty)
-                // directly before CMD_SEND_CHANNEL_TXT_MSG via the 600ms BLE queue.
-                enqueueCommand(scopeCmd)
-                enqueueCommand(buffer.array())
+                fun buildChannelPacket(txEpochSec: Int): ByteArray {
+                    val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
+                    buffer.put(CMD_SEND_CHANNEL_TXT_MSG)
+                    buffer.put(0x00)
+                    buffer.put(channel.index.toByte())
+                    buffer.putInt(txEpochSec)
+                    buffer.put(textBytes)
+                    return buffer.array()
+                }
+
+                // Pace rapid consecutive channel sends so LoRa TX & repeaters have breathing room
+                val nowMs = System.currentTimeMillis()
+                val scheduledAtMs = maxOf(nowMs, lastChannelTxScheduledAtMs + CHANNEL_SEND_MIN_SPACING_MS)
+                val initialPacingDelayMs = (scheduledAtMs - nowMs).coerceAtLeast(0L)
+                lastChannelTxScheduledAtMs = scheduledAtMs
 
                 updateMessages { list ->
                     list + ChatMessage(
@@ -914,10 +958,62 @@ class MeshCoreBleManager(private val context: Context) {
                         targetId = target.id,
                         text = cleanText,
                         isFromMe = true,
-                        deliveryStatus = DeliveryStatus.GROUP_SENT,
+                        deliveryStatus = DeliveryStatus.GROUP_WAITING_REPEATER,
                         expectedAckTag = null
                     )
                 }
+
+                pendingGroupEchoes[msgId] = PendingGroupEcho(
+                    msgId = msgId,
+                    channelIndex = channel.index,
+                    text = cleanText,
+                    createdAtMs = scheduledAtMs
+                )
+
+                activeSendJobs[msgId]?.cancel()
+                val job = scope.launch {
+                    try {
+                        if (initialPacingDelayMs > 0L) {
+                            delay(initialPacingDelayMs)
+                        }
+                        val firstEpochSec = (System.currentTimeMillis() / 1000L).toInt()
+                        enqueueCommand(buildFloodScopePacket(channel.regionScope))
+                        enqueueCommand(buildChannelPacket(firstEpochSec))
+
+                        // Wait 30s for at least one repeater to echo the packet (PUSH_LOG_RX_DATA 0x88)
+                        delay(GROUP_REPEATER_WAIT_MS)
+                        val stillWaiting = _messages.value.firstOrNull {
+                            it.id == msgId && it.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER
+                        }
+                        if (stillWaiting != null) {
+                            // No repeater heard yet -> re-send automatically a second time
+                            val retryNowMs = System.currentTimeMillis()
+                            val retrySchedMs = maxOf(retryNowMs, lastChannelTxScheduledAtMs + CHANNEL_SEND_MIN_SPACING_MS)
+                            val retryWaitMs = (retrySchedMs - retryNowMs).coerceAtLeast(0L)
+                            lastChannelTxScheduledAtMs = retrySchedMs
+                            if (retryWaitMs > 0L) {
+                                delay(retryWaitMs)
+                            }
+                            val secondEpochSec = (System.currentTimeMillis() / 1000L).toInt()
+                            enqueueCommand(buildFloodScopePacket(channel.regionScope))
+                            enqueueCommand(buildChannelPacket(secondEpochSec))
+
+                            // Give the 2nd attempt 30s to be heard by a repeater; otherwise finalize as GROUP_SENT
+                            delay(GROUP_REPEATER_WAIT_MS)
+                            updateMessages { list ->
+                                list.map { m ->
+                                    if (m.id == msgId && m.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER) {
+                                        m.copy(deliveryStatus = DeliveryStatus.GROUP_SENT)
+                                    } else m
+                                }
+                            }
+                        }
+                    } finally {
+                        pendingGroupEchoes.remove(msgId)
+                        activeSendJobs.remove(msgId)
+                    }
+                }
+                activeSendJobs[msgId] = job
             }
         }
     }
@@ -951,6 +1047,33 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+    // MeshCore PUSH_LOG_RX_DATA (0x88) delivers overheard LoRa packets (e.g. repeater re-broadcasts).
+    // When our companion radio hears a repeater repeat our channel message (PAYLOAD_TYPE_GRP_TXT = 0x05),
+    // mark the oldest matching pending group message as confirmed by at least one repeater.
+    private fun handleRepeaterRxEcho(frame: ByteArray) {
+        if (pendingGroupEchoes.isEmpty() || frame.size < 6) return
+        // frame[0] = 0x88, frame[1] = snr, frame[2] = rssi, frame[3..] = raw LoRa packet
+        // LoRa header byte at frame[3]: bits 2..5 = payload_type (0x05 = GRP_TXT)
+        val header = frame[3].toInt() and 0xFF
+        val payloadType = (header shr 2) and 0x0F
+        if (payloadType != 0x05) return
+
+        val nowMs = System.currentTimeMillis()
+        val candidate = pendingGroupEchoes.values
+            .filter { (nowMs - it.createdAtMs) in 150L..65_000L }
+            .minByOrNull { it.createdAtMs } ?: return
+
+        pendingGroupEchoes.remove(candidate.msgId)
+        activeSendJobs.remove(candidate.msgId)?.cancel()
+        updateMessages { list ->
+            list.map { m ->
+                if (m.id == candidate.msgId && m.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER) {
+                    m.copy(deliveryStatus = DeliveryStatus.GROUP_REPEATER_HEARD)
+                } else m
+            }
+        }
+    }
+
     private fun enqueueCommand(data: ByteArray) {
         commandQueue.add(data)
         processNextCommand()
@@ -970,6 +1093,7 @@ class MeshCoreBleManager(private val context: Context) {
         val rx = rxCharacteristic ?: return
         val gatt = bluetoothGatt ?: return
 
+        lastWrittenCommand = next
         isWriting = true
         awaitingCommandAck = true
         try {
@@ -1098,6 +1222,9 @@ class MeshCoreBleManager(private val context: Context) {
             }
             PUSH_MSG_WAITING -> {
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
+            }
+            PUSH_LOG_RX_DATA -> {
+                handleRepeaterRxEcho(frame)
             }
             RESP_CONTACT -> {
                 if (frame.size >= 132) {

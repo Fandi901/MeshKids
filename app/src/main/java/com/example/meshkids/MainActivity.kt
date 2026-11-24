@@ -382,21 +382,30 @@ fun KidChatScreen(
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
             items(messages, key = { it.id }) { msg ->
-                val isGroupMsg = target.type == ChatTargetType.CHANNEL || msg.deliveryStatus == DeliveryStatus.GROUP_SENT
+                val isGroupMsg = target.type == ChatTargetType.CHANNEL ||
+                    msg.deliveryStatus == DeliveryStatus.GROUP_SENT ||
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER ||
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD
                 val bubbleColor = when {
                     !msg.isFromMe -> Color.White
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> greenDeliveredColor
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> Color(0xFFEF6C00)
                     isGroupMsg -> blueGroupColor
                     msg.deliveryStatus == DeliveryStatus.DELIVERED -> greenDeliveredColor
                     else -> redPendingOrFailedColor
                 }
                 val textColor = if (msg.isFromMe) Color.White else Color.Black
                 val statusLabel = when {
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> "Vom Repeater gehoert"
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> "Sende / warte auf Repeater..."
                     isGroupMsg -> "Gesendet (Gruppe)"
                     msg.deliveryStatus == DeliveryStatus.DELIVERED -> "Zugestellt"
                     msg.deliveryStatus == DeliveryStatus.FAILED -> "Keine Zustellbestaetigung"
                     else -> "Warte auf Zustellbestaetigung..."
                 }
                 val statusColor = when {
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> greenDeliveredColor
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> Color(0xFFEF6C00)
                     isGroupMsg -> blueGroupColor
                     msg.deliveryStatus == DeliveryStatus.DELIVERED -> greenDeliveredColor
                     else -> redPendingOrFailedColor
@@ -552,7 +561,16 @@ fun ParentSettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Admin-Einstellungen") },
+                title = {
+                    Column {
+                        Text("Admin-Einstellungen")
+                        Text(
+                            text = "MeshKidsChat v${MeshCoreBleManager.APP_VERSION}",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurueck")
@@ -914,6 +932,14 @@ fun ParentSettingsScreen(
                         Text("Standard")
                     }
                 }
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "App-Version: ${MeshCoreBleManager.APP_VERSION}",
+                    fontSize = 13.sp,
+                    color = Color.Gray
+                )
             }
         }
     }
