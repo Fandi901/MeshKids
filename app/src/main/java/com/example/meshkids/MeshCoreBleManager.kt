@@ -47,6 +47,7 @@ data class MeshChannel(
     val index: Int,
     val originalName: String,
     val aliasName: String,
+    val regionScope: String = "",
     val isEncryptedPskSet: Boolean = false,
     val isAllowedForKid: Boolean = false
 ) {
@@ -82,7 +83,8 @@ data class ChatMessage(
 class MeshCoreBleManager(private val context: Context) {
 
     companion object {
-        const val DIRECT_MSG_TIMEOUT_MS: Long = 180_000L
+        const val RETRY_INTERVAL_MS: Long = 120_000L
+        const val MAX_SEND_ATTEMPTS: Int = 3
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
@@ -124,6 +126,7 @@ class MeshCoreBleManager(private val context: Context) {
     private var rxCharacteristic: BluetoothGattCharacteristic? = null
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val activeSendJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private var reconnectJob: Job? = null
     private var manualDisconnect = false
     private var isConnecting = false
@@ -320,11 +323,13 @@ class MeshCoreBleManager(private val context: Context) {
                 null
             } else {
                 val savedAlias = prefs.getString("channel_alias_$idx", "") ?: ""
+                val savedScope = prefs.getString("channel_scope_$idx", "") ?: ""
                 val hasPsk = prefs.getBoolean("device_channel_has_psk_$idx", false)
                 MeshChannel(
                     index = idx,
                     originalName = deviceName,
                     aliasName = savedAlias,
+                    regionScope = savedScope,
                     isEncryptedPskSet = hasPsk,
                     isAllowedForKid = allowedSet.contains(idx.toString())
                 )
@@ -735,6 +740,14 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+    fun setChannelRegionScope(channelIndex: Int, regionScope: String) {
+        val cleanScope = sanitizeText(regionScope).take(32)
+        prefs.edit().putString("channel_scope_$channelIndex", cleanScope).apply()
+        _channels.value = _channels.value.map {
+            if (it.index == channelIndex) it.copy(regionScope = cleanScope) else it
+        }
+    }
+
     fun setKidNodeName(name: String) {
         val cleanName = sanitizeText(name).take(31)
         if (cleanName.isEmpty()) return
@@ -758,14 +771,19 @@ class MeshCoreBleManager(private val context: Context) {
                 val contact = target.contact ?: return
                 val textBytes = cleanText.toByteArray(Charsets.UTF_8)
 
-                val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + 6 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
-                buffer.put(CMD_SEND_TXT_MSG)
-                buffer.put(0x00)
-                buffer.put(0x00)
-                buffer.putInt(epochSec)
-                buffer.put(contact.pubKeyPrefixBytes)
-                buffer.put(textBytes)
-                enqueueCommand(buffer.array())
+                fun buildDirectPacket(tagEpochSec: Int): ByteArray {
+                    val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + 6 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
+                    buffer.put(CMD_SEND_TXT_MSG)
+                    buffer.put(0x00)
+                    buffer.put(0x00)
+                    buffer.putInt(tagEpochSec)
+                    buffer.put(contact.pubKeyPrefixBytes)
+                    buffer.put(textBytes)
+                    return buffer.array()
+                }
+
+                // Attempt 1 (immediate)
+                enqueueCommand(buildDirectPacket(epochSec))
 
                 updateMessages { list ->
                     list + ChatMessage(
@@ -778,16 +796,41 @@ class MeshCoreBleManager(private val context: Context) {
                     )
                 }
 
-                scope.launch {
-                    delay(DIRECT_MSG_TIMEOUT_MS)
-                    updateMessages { list ->
-                        list.map { m ->
-                            if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
-                                m.copy(deliveryStatus = DeliveryStatus.FAILED)
-                            } else m
+                activeSendJobs[msgId]?.cancel()
+                val job = scope.launch {
+                    try {
+                        for (attempt in 2..MAX_SEND_ATTEMPTS) {
+                            delay(RETRY_INTERVAL_MS)
+                            val currentMsg = _messages.value.firstOrNull { it.id == msgId }
+                            if (currentMsg == null || currentMsg.deliveryStatus != DeliveryStatus.SENDING) {
+                                return@launch
+                            }
+                            val retryEpochSec = (System.currentTimeMillis() / 1000L).toInt()
+                            val retryAckTag = (retryEpochSec and 0x7FFFFFFF)
+                            updateMessages { list ->
+                                list.map { m ->
+                                    if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
+                                        m.copy(expectedAckTag = retryAckTag)
+                                    } else m
+                                }
+                            }
+                            enqueueCommand(buildDirectPacket(retryEpochSec))
                         }
+
+                        // Wait 2 minutes after the 3rd attempt before marking permanently FAILED
+                        delay(RETRY_INTERVAL_MS)
+                        updateMessages { list ->
+                            list.map { m ->
+                                if (m.id == msgId && m.deliveryStatus == DeliveryStatus.SENDING) {
+                                    m.copy(deliveryStatus = DeliveryStatus.FAILED)
+                                } else m
+                            }
+                        }
+                    } finally {
+                        activeSendJobs.remove(msgId)
                     }
                 }
+                activeSendJobs[msgId] = job
             }
 
             ChatTargetType.CHANNEL -> {
@@ -835,6 +878,8 @@ class MeshCoreBleManager(private val context: Context) {
         }
 
         if (targetIdx < 0) return
+        val confirmedMsgId = currentList[targetIdx].id
+        activeSendJobs.remove(confirmedMsgId)?.cancel()
 
         updateMessages { list ->
             list.mapIndexed { idx, msg ->

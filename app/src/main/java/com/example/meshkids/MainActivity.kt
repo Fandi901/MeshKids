@@ -190,7 +190,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                     IconButton(onClick = { showPinDialog = true }) {
                         Icon(
                             imageVector = Icons.Default.Settings,
-                            contentDescription = "Eltern-Einstellungen",
+                            contentDescription = "Admin-Einstellungen",
                             tint = Color.White
                         )
                     }
@@ -260,7 +260,7 @@ fun KidTargetListScreen(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "Bitte deine Eltern, oben rechts auf das Zahnrad zu tippen, um Kontakte oder den Familien-Chat freizugeben.",
+                text = "Bitte den Admin, oben rechts auf das Zahnrad zu tippen, um Kontakte oder Gruppenchats freizugeben.",
                 fontSize = 16.sp,
                 color = Color.DarkGray
             )
@@ -353,8 +353,23 @@ fun KidChatScreen(
     val blueGroupColor = Color(0xFF1E88E5)
     val greenDeliveredColor = Color(0xFF2E7D32)
     val redPendingOrFailedColor = Color(0xFFD32F2F)
+    val channelScope = target.channel?.regionScope?.trim().orEmpty()
 
     Column(modifier = Modifier.fillMaxSize()) {
+        if (target.type == ChatTargetType.CHANNEL) {
+            Surface(
+                color = Color(0xFFE3F2FD),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = if (channelScope.isNotEmpty()) "Scope / Region: $channelScope" else "Scope / Region: Standard (kein Scope gesetzt)",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF0D47A1),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                )
+            }
+        }
         LazyColumn(
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -474,10 +489,10 @@ fun ParentPinDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Eltern-Bereich geschuetzt") },
+        title = { Text("Admin-Bereich geschuetzt") },
         text = {
             Column {
-                Text("Bitte Eltern-PIN eingeben (Standard: 1234):")
+                Text("Bitte Admin-PIN eingeben (Standard: 1234):")
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
                     value = enteredPin,
@@ -531,7 +546,7 @@ fun ParentSettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Eltern-Einstellungen") },
+                title = { Text("Admin-Einstellungen") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurueck")
@@ -713,39 +728,72 @@ fun ParentSettingsScreen(
                 var aliasField by remember(channel.index, channel.aliasName) {
                     mutableStateOf(channel.aliasName)
                 }
-                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = "Kanal ${channel.index}: ${channel.displayName}", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                text = "Geraetekanal: ${channel.originalName} • ${if (channel.isEncryptedPskSet) "PSK im Geraet" else "Offen / kein PSK"}",
-                                fontSize = 12.sp,
-                                color = Color.Gray
+                var scopeField by remember(channel.index, channel.regionScope) {
+                    mutableStateOf(channel.regionScope)
+                }
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FBFD))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = "Kanal ${channel.index}: ${channel.displayName}", fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = "Geraetekanal: ${channel.originalName} • ${if (channel.isEncryptedPskSet) "PSK im Geraet" else "Offen / kein PSK"}",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray
+                                )
+                                Text(
+                                    text = "Scope / Region: ${channel.regionScope.ifBlank { "Standard" }}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF1565C0)
+                                )
+                            }
+                            Switch(
+                                checked = channel.isAllowedForKid,
+                                onCheckedChange = { bleManager.toggleChannelAllowed(channel.index, it) }
                             )
                         }
-                        Switch(
-                            checked = channel.isAllowedForKid,
-                            onCheckedChange = { bleManager.toggleChannelAllowed(channel.index, it) }
-                        )
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = aliasField,
-                            onValueChange = { aliasField = it },
-                            modifier = Modifier.weight(1f),
-                            placeholder = { Text("Alias (z. B. Familie)") },
-                            singleLine = true
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        OutlinedButton(onClick = {
-                            bleManager.setChannelAlias(channel.index, aliasField)
-                            infoBanner = "Alias fuer Kanal ${channel.index} gespeichert."
-                        }) {
-                            Text("Alias")
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = aliasField,
+                                onValueChange = { aliasField = it },
+                                modifier = Modifier.weight(1f),
+                                placeholder = { Text("Alias (z. B. Familie)") },
+                                singleLine = true
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            OutlinedButton(onClick = {
+                                bleManager.setChannelAlias(channel.index, aliasField)
+                                infoBanner = "Alias fuer Kanal ${channel.index} gespeichert."
+                            }) {
+                                Text("Alias")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = scopeField,
+                                onValueChange = { if (it.length <= 32) scopeField = it },
+                                modifier = Modifier.weight(1f),
+                                placeholder = { Text("Scope / Region (z. B. nrw, ruhr)") },
+                                singleLine = true
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            OutlinedButton(onClick = {
+                                bleManager.setChannelRegionScope(channel.index, scopeField)
+                                infoBanner = "Scope fuer Kanal ${channel.index} gespeichert."
+                            }) {
+                                Text("Scope")
+                            }
                         }
                     }
                 }
@@ -778,7 +826,7 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("5. Eltern-PIN aendern", fontWeight = FontWeight.Bold)
+                Text("5. Admin-PIN aendern", fontWeight = FontWeight.Bold)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = newPin,
@@ -793,7 +841,7 @@ fun ParentSettingsScreen(
                         if (newPin.length >= 4) {
                             pinManager.setPin(newPin)
                             newPin = ""
-                            infoBanner = "Eltern-PIN wurde geaendert."
+                            infoBanner = "Admin-PIN wurde geaendert."
                         }
                     }) {
                         Text("PIN setzen")
