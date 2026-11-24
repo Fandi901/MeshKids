@@ -787,16 +787,13 @@ class MeshCoreBleManager(private val context: Context) {
 
     fun applyChannelFloodScope(regionScope: String) {
         val cleanRegion = sanitizeText(regionScope).removePrefix("#").trim().lowercase().take(31)
-        if (cleanRegion.isEmpty()) return
-
-        // MeshCore companion protocol CMD_SET_FLOOD_SCOPE (0x22):
-        // Sends the region name (e.g. "de-nw") directly so the firmware resolves the
-        // region from its own region table instead of guessing a local hash.
         val scopeBytes = cleanRegion.toByteArray(Charsets.UTF_8)
-        val cmdScope = ByteArray(1 + scopeBytes.size)
-        cmdScope[0] = CMD_SET_FLOOD_SCOPE
-        System.arraycopy(scopeBytes, 0, cmdScope, 1, scopeBytes.size)
-        enqueueCommand(cmdScope)
+        val cmd = ByteArray(1 + scopeBytes.size)
+        cmd[0] = CMD_SET_FLOOD_SCOPE
+        if (scopeBytes.isNotEmpty()) {
+            System.arraycopy(scopeBytes, 0, cmd, 1, scopeBytes.size)
+        }
+        enqueueCommand(cmd)
     }
 
     fun setChannelRegionScope(channelIndex: Int, regionScope: String) {
@@ -894,7 +891,14 @@ class MeshCoreBleManager(private val context: Context) {
 
             ChatTargetType.CHANNEL -> {
                 val channel = target.channel ?: return
-                val customScope = sanitizeText(channel.regionScope).trim()
+                val cleanRegion = sanitizeText(channel.regionScope).removePrefix("#").trim().lowercase().take(31)
+                val scopeBytes = cleanRegion.toByteArray(Charsets.UTF_8)
+                val scopeCmd = ByteArray(1 + scopeBytes.size)
+                scopeCmd[0] = CMD_SET_FLOOD_SCOPE
+                if (scopeBytes.isNotEmpty()) {
+                    System.arraycopy(scopeBytes, 0, scopeCmd, 1, scopeBytes.size)
+                }
+
                 val textBytes = cleanText.toByteArray(Charsets.UTF_8)
                 val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
                 buffer.put(CMD_SEND_CHANNEL_TXT_MSG)
@@ -902,15 +906,12 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(channel.index.toByte())
                 buffer.putInt(epochSec)
                 buffer.put(textBytes)
-                if (customScope.isNotEmpty()) {
-                    applyChannelFloodScope(customScope)
-                    scope.launch {
-                        delay(120L)
-                        enqueueCommand(buffer.array())
-                    }
-                } else {
-                    enqueueCommand(buffer.array())
-                }
+
+                // Always set the per-channel scope right before sending this channel message
+                // (including clearing to default when a channel has no scope set) so different
+                // channels never reuse each other's scope.
+                enqueueCommand(scopeCmd)
+                enqueueCommand(buffer.array())
 
                 updateMessages { list ->
                     list + ChatMessage(
@@ -994,7 +995,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
             ackTimeoutJob?.cancel()
             ackTimeoutJob = scope.launch {
-                delay(250L)
+                delay(600L)
                 if (awaitingCommandAck) {
                     awaitingCommandAck = false
                     isWriting = false
