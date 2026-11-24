@@ -91,7 +91,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "1.2"
+        const val APP_VERSION: String = "1.3"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -1153,52 +1153,36 @@ class MeshCoreBleManager(private val context: Context) {
         manualAliases: Map<String, String> = _manualGroupAliases.value
     ): String {
         val trimmedSender = rawSender.trim()
-        val cleanedSender = stripLeadingK(trimmedSender)
-
-        val candidates = listOf(trimmedSender, cleanedSender)
-            .map { it.lowercase() }
-            .filter { it.isNotEmpty() }
-            .distinct()
+        val senderLower = trimmedSender.lowercase()
+        if (senderLower.isEmpty()) return trimmedSender
 
         for ((rawChatName, rawManualAlias) in manualAliases) {
-            val chatClean = stripLeadingK(rawChatName.trim()).lowercase()
             val chatRawLower = rawChatName.trim().lowercase()
             val aliasVal = rawManualAlias.trim()
-            if (aliasVal.isNotEmpty() && candidates.any { it == chatRawLower || (chatClean.isNotEmpty() && it == chatClean) }) {
+            if (aliasVal.isNotEmpty() && senderLower == chatRawLower) {
                 return aliasVal
             }
         }
 
         for (c in contactsList) {
             val aliasRaw = c.aliasName.trim()
-            val aliasClean = stripLeadingK(aliasRaw)
             val origRaw = c.originalName.trim()
-            val origClean = stripLeadingK(origRaw)
             val prefixLower = c.pubKeyPrefixHex.lowercase()
 
-            val knownKeys = listOf(aliasRaw, aliasClean, origRaw, origClean)
+            val knownKeys = listOf(aliasRaw, origRaw)
                 .map { it.lowercase() }
                 .filter { it.isNotEmpty() }
 
-            val matchesContact = candidates.any { cand ->
-                knownKeys.contains(cand) || (prefixLower.isNotEmpty() && cand.startsWith(prefixLower))
-            }
+            val matchesContact = knownKeys.contains(senderLower) ||
+                (prefixLower.isNotEmpty() && senderLower.startsWith(prefixLower))
 
             if (matchesContact) {
-                val chosen = if (aliasRaw.isNotEmpty()) aliasRaw else origClean
+                val chosen = if (aliasRaw.isNotEmpty()) aliasRaw else origRaw
                 if (chosen.isNotEmpty()) return chosen
             }
         }
 
-        return cleanedSender
-    }
-
-    private fun stripLeadingK(name: String): String {
-        if (name.length > 1 && name.startsWith("k", ignoreCase = true)) {
-            val rest = name.substring(1).removePrefix(":").trim()
-            if (rest.isNotEmpty()) return rest
-        }
-        return name
+        return trimmedSender
     }
 
     private fun handleIncomingFrame(frame: ByteArray) {
@@ -1273,7 +1257,7 @@ class MeshCoreBleManager(private val context: Context) {
             RESP_CONTACT_MSG_RECV -> {
                 if (frame.size > 13) {
                     val prefixHex = frame.copyOfRange(1, 7).joinToString("") { "%02x".format(it) }
-                    val tsMs = extractEpochMs(frame, 8)
+                    val tsMs = extractEpochMs(frame, 9)
                     val text = decodeCleanUtf8(frame.copyOfRange(13, frame.size))
                     if (text.isNotBlank()) addIncomingContactMessageIfAllowed(prefixHex, text, tsMs)
                 }
@@ -1282,26 +1266,26 @@ class MeshCoreBleManager(private val context: Context) {
             RESP_CONTACT_MSG_RECV_V3 -> {
                 if (frame.size > 16) {
                     val prefixHex = frame.copyOfRange(4, 10).joinToString("") { "%02x".format(it) }
-                    val tsMs = extractEpochMs(frame, 11)
+                    val tsMs = extractEpochMs(frame, 12)
                     val text = decodeCleanUtf8(frame.copyOfRange(16, frame.size))
                     if (text.isNotBlank()) addIncomingContactMessageIfAllowed(prefixHex, text, tsMs)
                 }
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
             }
             RESP_CHANNEL_MSG_RECV -> {
-                if (frame.size > 7) {
+                if (frame.size > 8) {
                     val chIdx = frame[1].toInt() and 0xFF
-                    val tsMs = extractEpochMs(frame, 3)
-                    val rawText = decodeCleanUtf8(frame.copyOfRange(7, frame.size))
+                    val tsMs = extractEpochMs(frame, 4)
+                    val rawText = decodeCleanUtf8(frame.copyOfRange(8, frame.size))
                     if (rawText.isNotBlank()) addIncomingChannelMessageIfAllowed(chIdx, rawText, tsMs)
                 }
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
             }
             RESP_CHANNEL_MSG_RECV_V3 -> {
-                if (frame.size > 10) {
+                if (frame.size > 11) {
                     val chIdx = frame[4].toInt() and 0xFF
-                    val tsMs = extractEpochMs(frame, 6)
-                    val rawText = decodeCleanUtf8(frame.copyOfRange(10, frame.size))
+                    val tsMs = extractEpochMs(frame, 7)
+                    val rawText = decodeCleanUtf8(frame.copyOfRange(11, frame.size))
                     if (rawText.isNotBlank()) addIncomingChannelMessageIfAllowed(chIdx, rawText, tsMs)
                 }
                 enqueueCommand(byteArrayOf(CMD_SYNC_NEXT_MESSAGE))
