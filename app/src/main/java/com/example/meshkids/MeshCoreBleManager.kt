@@ -788,12 +788,19 @@ class MeshCoreBleManager(private val context: Context) {
     fun applyChannelFloodScope(regionScope: String) {
         val cleanRegion = sanitizeText(regionScope).removePrefix("#").trim().lowercase().take(31)
         val scopeBytes = cleanRegion.toByteArray(Charsets.UTF_8)
-        val cmd = ByteArray(1 + scopeBytes.size)
-        cmd[0] = CMD_SET_FLOOD_SCOPE
+        val cmd22 = ByteArray(1 + scopeBytes.size)
+        cmd22[0] = CMD_SET_FLOOD_SCOPE
         if (scopeBytes.isNotEmpty()) {
-            System.arraycopy(scopeBytes, 0, cmd, 1, scopeBytes.size)
+            System.arraycopy(scopeBytes, 0, cmd22, 1, scopeBytes.size)
         }
-        enqueueCommand(cmd)
+
+        val key16 = deriveFloodScopeKey16(cleanRegion)
+        val cmd36 = ByteArray(1 + 16)
+        cmd36[0] = CMD_SET_FLOOD_SCOPE_KEY
+        System.arraycopy(key16, 0, cmd36, 1, 16)
+
+        enqueueCommand(cmd22)
+        enqueueCommand(cmd36)
     }
 
     fun setChannelRegionScope(channelIndex: Int, regionScope: String) {
@@ -892,12 +899,18 @@ class MeshCoreBleManager(private val context: Context) {
             ChatTargetType.CHANNEL -> {
                 val channel = target.channel ?: return
                 val cleanRegion = sanitizeText(channel.regionScope).removePrefix("#").trim().lowercase().take(31)
+
                 val scopeBytes = cleanRegion.toByteArray(Charsets.UTF_8)
-                val scopeCmd = ByteArray(1 + scopeBytes.size)
-                scopeCmd[0] = CMD_SET_FLOOD_SCOPE
+                val scopeCmd22 = ByteArray(1 + scopeBytes.size)
+                scopeCmd22[0] = CMD_SET_FLOOD_SCOPE
                 if (scopeBytes.isNotEmpty()) {
-                    System.arraycopy(scopeBytes, 0, scopeCmd, 1, scopeBytes.size)
+                    System.arraycopy(scopeBytes, 0, scopeCmd22, 1, scopeBytes.size)
                 }
+
+                val key16 = deriveFloodScopeKey16(cleanRegion)
+                val scopeCmd36 = ByteArray(1 + 16)
+                scopeCmd36[0] = CMD_SET_FLOOD_SCOPE_KEY
+                System.arraycopy(key16, 0, scopeCmd36, 1, 16)
 
                 val textBytes = cleanText.toByteArray(Charsets.UTF_8)
                 val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
@@ -907,10 +920,10 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.putInt(epochSec)
                 buffer.put(textBytes)
 
-                // Always set the per-channel scope right before sending this channel message
-                // (including clearing to default when a channel has no scope set) so different
-                // channels never reuse each other's scope.
-                enqueueCommand(scopeCmd)
+                // Queue both scope commands sequentially with the 600ms queue pacing right before
+                // sending the channel message so different per-channel scopes apply cleanly.
+                enqueueCommand(scopeCmd22)
+                enqueueCommand(scopeCmd36)
                 enqueueCommand(buffer.array())
 
                 updateMessages { list ->
