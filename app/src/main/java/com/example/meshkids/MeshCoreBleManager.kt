@@ -91,7 +91,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "1.4"
+        const val APP_VERSION: String = "1.5"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -170,8 +170,54 @@ class MeshCoreBleManager(private val context: Context) {
     private val _discoveredDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
     val discoveredDevices: StateFlow<List<BluetoothDevice>> = _discoveredDevices
 
-    private val _contacts = MutableStateFlow<List<MeshContact>>(emptyList())
+    private val _contacts = MutableStateFlow<List<MeshContact>>(loadCachedContacts())
     val contacts: StateFlow<List<MeshContact>> = _contacts
+
+    private fun saveCachedContacts(list: List<MeshContact>) {
+        try {
+            val arr = JSONArray()
+            for (c in list) {
+                val obj = JSONObject().apply {
+                    put("prefixHex", c.pubKeyPrefixHex)
+                    put("prefixBytesHex", c.pubKeyPrefixBytes.joinToString("") { "%02x".format(it) })
+                    put("originalName", c.originalName)
+                    put("aliasName", c.aliasName)
+                    put("isAllowedForKid", c.isAllowedForKid)
+                }
+                arr.put(obj)
+            }
+            prefs.edit().putString("cached_contacts_json", arr.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun loadCachedContacts(): List<MeshContact> {
+        val rawJson = prefs.getString("cached_contacts_json", null) ?: return emptyList()
+        val allowedSet = (prefs.getStringSet("allowed_contacts", emptySet()) ?: emptySet()).map { it.lowercase() }.toSet()
+        return try {
+            val arr = JSONArray(rawJson)
+            val result = ArrayList<MeshContact>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val prefixHex = obj.optString("prefixHex", "").lowercase()
+                if (prefixHex.length != 12) continue
+                val bytesHex = obj.optString("prefixBytesHex", prefixHex)
+                val prefixBytes = ByteArray(6) { idx ->
+                    val hi = Character.digit(bytesHex.getOrElse(idx * 2) { '0' }, 16)
+                    val lo = Character.digit(bytesHex.getOrElse(idx * 2 + 1) { '0' }, 16)
+                    (((if (hi >= 0) hi else 0) shl 4) or (if (lo >= 0) lo else 0)).toByte()
+                }
+                val origName = obj.optString("originalName", "Node $prefixHex")
+                val savedAlias = prefs.getString("contact_alias_$prefixHex", null)
+                    ?: obj.optString("aliasName", "")
+                val isAllowed = allowedSet.contains(prefixHex) || obj.optBoolean("isAllowedForKid", false)
+                result.add(MeshContact(prefixHex, prefixBytes, origName, savedAlias, isAllowed))
+            }
+            result
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
 
     private val _manualGroupAliases = MutableStateFlow<Map<String, String>>(loadManualGroupAliases())
     val manualGroupAliases: StateFlow<Map<String, String>> = _manualGroupAliases
@@ -764,6 +810,7 @@ class MeshCoreBleManager(private val context: Context) {
             if (it.pubKeyPrefixHex == prefixHex) it.copy(aliasName = cleanAlias) else it
         }
         _contacts.value = updatedContacts
+        saveCachedContacts(updatedContacts)
         refreshExistingMessageSenderNames(updatedContacts)
     }
 
@@ -983,7 +1030,9 @@ class MeshCoreBleManager(private val context: Context) {
                             delay(initialPacingDelayMs)
                         }
                         val firstEpochSec = (System.currentTimeMillis() / 1000L).toInt()
-                        enqueueCommand(buildFloodScopePacket(channel.regionScope))
+                        if (channel.regionScope.isNotBlank()) {
+                            enqueueCommand(buildFloodScopePacket(channel.regionScope))
+                        }
                         enqueueCommand(buildChannelPacket(firstEpochSec))
 
                         // Wait 30s for at least one repeater to echo the packet (PUSH_LOG_RX_DATA 0x88)
@@ -1001,7 +1050,9 @@ class MeshCoreBleManager(private val context: Context) {
                                 delay(retryWaitMs)
                             }
                             val secondEpochSec = (System.currentTimeMillis() / 1000L).toInt()
-                            enqueueCommand(buildFloodScopePacket(channel.regionScope))
+                            if (channel.regionScope.isNotBlank()) {
+                                enqueueCommand(buildFloodScopePacket(channel.regionScope))
+                            }
                             enqueueCommand(buildChannelPacket(secondEpochSec))
 
                             // Give the 2nd attempt 30s to be heard by a repeater; otherwise finalize as GROUP_SENT
@@ -1267,6 +1318,7 @@ class MeshCoreBleManager(private val context: Context) {
                     val updated = _contacts.value.filterNot { it.pubKeyPrefixHex == prefixHex } +
                             MeshContact(prefixHex, prefixBytes, origName, aliasName, isAllowed)
                     _contacts.value = updated
+                    saveCachedContacts(updated)
                     refreshExistingMessageSenderNames(updated)
                 }
             }
@@ -1410,9 +1462,11 @@ class MeshCoreBleManager(private val context: Context) {
         if (allowed) current.add(prefixHex) else current.remove(prefixHex)
         prefs.edit().putStringSet("allowed_contacts", current).apply()
 
-        _contacts.value = _contacts.value.map {
+        val updatedAllowed = _contacts.value.map {
             if (it.pubKeyPrefixHex == prefixHex) it.copy(isAllowedForKid = allowed) else it
         }
+        _contacts.value = updatedAllowed
+        saveCachedContacts(updatedAllowed)
     }
 
     fun toggleChannelAllowed(channelIndex: Int, allowed: Boolean) {
