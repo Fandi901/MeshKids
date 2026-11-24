@@ -237,7 +237,6 @@ fun KidTargetListScreen(
     alertCounter: Long,
     onSelectTarget: (ChatTarget) -> Unit
 ) {
-    // Explicit discrete blinking loop whenever unreadTargetIds is non-empty or a new message arrives
     var blinkPhase by remember { mutableStateOf(false) }
     LaunchedEffect(unreadTargetIds, alertCounter) {
         if (unreadTargetIds.isEmpty()) {
