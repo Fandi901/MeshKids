@@ -108,6 +108,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CMD_SET_ADVERT_NAME: Byte = 0x08
         const val CMD_SYNC_NEXT_MESSAGE: Byte = 0x0A
         const val CMD_GET_CHANNEL: Byte = 0x1F
+        const val CMD_SET_FLOOD_SCOPE_KEY: Byte = 0x36
 
         const val RESP_CONTACT: Byte = 0x03
         const val RESP_CONTACT_MSG_RECV: Byte = 0x07
@@ -740,6 +741,32 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+
+    private fun deriveFloodScopeKey16(regionScope: String): ByteArray {
+        val clean = sanitizeText(regionScope).trim().lowercase()
+        if (clean.isEmpty()) {
+            return ByteArray(16)
+        }
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(clean.toByteArray(Charsets.UTF_8))
+            digest.copyOfRange(0, 16)
+        } catch (_: Exception) {
+            val out = ByteArray(16)
+            val raw = clean.toByteArray(Charsets.UTF_8)
+            System.arraycopy(raw, 0, out, 0, minOf(raw.size, 16))
+            out
+        }
+    }
+
+    fun applyChannelFloodScope(regionScope: String) {
+        val key16 = deriveFloodScopeKey16(regionScope)
+        val cmd = ByteArray(1 + 16)
+        cmd[0] = CMD_SET_FLOOD_SCOPE_KEY
+        System.arraycopy(key16, 0, cmd, 1, 16)
+        enqueueCommand(cmd)
+    }
+
     fun setChannelRegionScope(channelIndex: Int, regionScope: String) {
         val cleanScope = sanitizeText(regionScope).take(32)
         prefs.edit().putString("channel_scope_$channelIndex", cleanScope).apply()
@@ -835,6 +862,7 @@ class MeshCoreBleManager(private val context: Context) {
 
             ChatTargetType.CHANNEL -> {
                 val channel = target.channel ?: return
+                applyChannelFloodScope(channel.regionScope)
                 val textBytes = cleanText.toByteArray(Charsets.UTF_8)
 
                 val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)

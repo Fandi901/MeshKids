@@ -135,7 +135,12 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     }
 
     LaunchedEffect(selectedTarget?.id) {
-        selectedTarget?.let { bleManager.markTargetRead(it.id) }
+        selectedTarget?.let { target ->
+            bleManager.markTargetRead(target.id)
+            if (target.type == ChatTargetType.CHANNEL) {
+                bleManager.applyChannelFloodScope(target.channel?.regionScope.orEmpty())
+            }
+        }
     }
 
     var showPinDialog by remember { mutableStateOf(false) }
