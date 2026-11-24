@@ -766,7 +766,8 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun applyChannelFloodScope(regionScope: String) {
-        val key16 = deriveFloodScopeKey16(regionScope)
+        val clean = sanitizeText(regionScope).trim().lowercase().removePrefix("#")
+        val key16 = deriveFloodScopeKey16(clean)
         val cmd = ByteArray(1 + 16)
         cmd[0] = CMD_SET_FLOOD_SCOPE_KEY
         System.arraycopy(key16, 0, cmd, 1, 16)
@@ -868,16 +869,25 @@ class MeshCoreBleManager(private val context: Context) {
 
             ChatTargetType.CHANNEL -> {
                 val channel = target.channel ?: return
-                applyChannelFloodScope(channel.regionScope)
                 val textBytes = cleanText.toByteArray(Charsets.UTF_8)
-
                 val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
                 buffer.put(CMD_SEND_CHANNEL_TXT_MSG)
                 buffer.put(0x00)
                 buffer.put(channel.index.toByte())
                 buffer.putInt(epochSec)
                 buffer.put(textBytes)
-                enqueueCommand(buffer.array())
+                val channelPacket = buffer.array()
+
+                val customScope = sanitizeText(channel.regionScope).trim()
+                if (customScope.isNotEmpty()) {
+                    applyChannelFloodScope(customScope)
+                    scope.launch {
+                        delay(150L)
+                        enqueueCommand(channelPacket)
+                    }
+                } else {
+                    enqueueCommand(channelPacket)
+                }
 
                 updateMessages { list ->
                     list + ChatMessage(
