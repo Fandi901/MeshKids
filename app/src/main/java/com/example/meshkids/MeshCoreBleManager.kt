@@ -766,18 +766,19 @@ class MeshCoreBleManager(private val context: Context) {
         }
         parseHex16OrNull(rawTrimmed)?.let { return it }
 
-        val scopedName = if (rawTrimmed.startsWith("#")) {
-            rawTrimmed.lowercase()
-        } else {
-            "#" + rawTrimmed.lowercase()
+        // Region scopes like "de-nw" are hashed directly without prepending '#'
+        // (channels may start with '#', regions do not).
+        val regionName = rawTrimmed.removePrefix("#").trim().lowercase()
+        if (regionName.isEmpty()) {
+            return ByteArray(16)
         }
         return try {
             val digest = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(scopedName.toByteArray(Charsets.UTF_8))
+                .digest(regionName.toByteArray(Charsets.UTF_8))
             digest.copyOfRange(0, 16)
         } catch (_: Exception) {
             val out = ByteArray(16)
-            val raw = scopedName.toByteArray(Charsets.UTF_8)
+            val raw = regionName.toByteArray(Charsets.UTF_8)
             System.arraycopy(raw, 0, out, 0, minOf(raw.size, 16))
             out
         }
@@ -887,9 +888,6 @@ class MeshCoreBleManager(private val context: Context) {
             ChatTargetType.CHANNEL -> {
                 val channel = target.channel ?: return
                 val customScope = sanitizeText(channel.regionScope).trim()
-                if (customScope.isNotEmpty()) {
-                    applyChannelFloodScope(customScope)
-                }
                 val textBytes = cleanText.toByteArray(Charsets.UTF_8)
                 val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
                 buffer.put(CMD_SEND_CHANNEL_TXT_MSG)
@@ -897,7 +895,15 @@ class MeshCoreBleManager(private val context: Context) {
                 buffer.put(channel.index.toByte())
                 buffer.putInt(epochSec)
                 buffer.put(textBytes)
-                enqueueCommand(buffer.array())
+                if (customScope.isNotEmpty()) {
+                    applyChannelFloodScope(customScope)
+                    scope.launch {
+                        delay(120L)
+                        enqueueCommand(buffer.array())
+                    }
+                } else {
+                    enqueueCommand(buffer.array())
+                }
 
                 updateMessages { list ->
                     list + ChatMessage(
