@@ -29,6 +29,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -264,7 +265,6 @@ fun KidTargetListScreen(
     alertCounter: Long,
     onSelectTarget: (ChatTarget) -> Unit
 ) {
-    // Explicit discrete blinking loop whenever unreadTargetIds is non-empty or a new message arrives
     var blinkPhase by remember { mutableStateOf(false) }
     LaunchedEffect(unreadTargetIds, alertCounter) {
         if (unreadTargetIds.isEmpty()) {
@@ -787,22 +787,23 @@ fun ParentSettingsScreen(
                                             }
                                         )
                                     }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        OutlinedTextField(
-                                            value = aliasField,
-                                            onValueChange = { aliasField = it },
-                                            modifier = Modifier.weight(1f),
-                                            placeholder = { Text("Alias (z. B. Mama)") },
-                                            singleLine = true
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        OutlinedButton(onClick = {
-                                            bleManager.setContactAlias(contact.pubKeyPrefixHex, aliasField)
-                                            infoBanner = "Alias fuer Kontakt gespeichert."
-                                        }) {
-                                            Text("Alias")
-                                        }
-                                    }
+                                    var aliasFocused by remember(contact.pubKeyPrefixHex) { mutableStateOf(false) }
+                                    OutlinedTextField(
+                                        value = aliasField,
+                                        onValueChange = { aliasField = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .onFocusChanged { focusState ->
+                                                val nowFocused = focusState.isFocused
+                                                if (aliasFocused && !nowFocused && aliasField != contact.aliasName) {
+                                                    bleManager.setContactAlias(contact.pubKeyPrefixHex, aliasField)
+                                                    infoBanner = "Alias fuer Kontakt gespeichert."
+                                                }
+                                                aliasFocused = nowFocused
+                                            },
+                                        placeholder = { Text("Alias (z. B. Mama) – wird beim Verlassen gespeichert") },
+                                        singleLine = true
+                                    )
                                 }
                             }
                         }
@@ -951,37 +952,89 @@ fun ParentSettingsScreen(
                             )
                         }
                         Spacer(modifier = Modifier.height(6.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(
-                                value = aliasField,
-                                onValueChange = { aliasField = it },
-                                modifier = Modifier.weight(1f),
-                                placeholder = { Text("Alias (z. B. Familie)") },
-                                singleLine = true
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            OutlinedButton(onClick = {
-                                bleManager.setChannelAlias(channel.index, aliasField)
-                                infoBanner = "Alias fuer Kanal ${channel.index} gespeichert."
-                            }) {
-                                Text("Alias")
+                        var chAliasFocused by remember(channel.index) { mutableStateOf(false) }
+                        OutlinedTextField(
+                            value = aliasField,
+                            onValueChange = { aliasField = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onFocusChanged { focusState ->
+                                    val nowFocused = focusState.isFocused
+                                    if (chAliasFocused && !nowFocused && aliasField != channel.aliasName) {
+                                        bleManager.setChannelAlias(channel.index, aliasField)
+                                        infoBanner = "Alias fuer Kanal ${channel.index} gespeichert."
+                                    }
+                                    chAliasFocused = nowFocused
+                                },
+                            placeholder = { Text("Alias (z. B. Familie) – wird beim Verlassen gespeichert") },
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        var scopeFocused by remember(channel.index) { mutableStateOf(false) }
+                        var scopeMenuExpanded by remember(channel.index) { mutableStateOf(false) }
+                        val filteredScopes = remember(scopeField) {
+                            val q = scopeField.trim().lowercase()
+                            if (q.isEmpty()) {
+                                MeshCoreBleManager.KNOWN_SCOPES.take(10)
+                            } else {
+                                val startsWithMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                                    it.lowercase().startsWith(q)
+                                }
+                                val containsMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                                    !it.lowercase().startsWith(q) && it.lowercase().contains(q)
+                                }
+                                (startsWithMatches + containsMatches).take(10)
                             }
                         }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+
+                        ExposedDropdownMenuBox(
+                            expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                            onExpandedChange = { expanded ->
+                                scopeMenuExpanded = expanded && filteredScopes.isNotEmpty()
+                            }
+                        ) {
                             OutlinedTextField(
                                 value = scopeField,
-                                onValueChange = { if (it.length <= 32) scopeField = it },
-                                modifier = Modifier.weight(1f),
-                                placeholder = { Text("Scope / Region (z. B. nrw, ruhr)") },
+                                onValueChange = { raw ->
+                                    if (raw.length <= 32) {
+                                        scopeField = raw
+                                        scopeMenuExpanded = filteredScopes.isNotEmpty()
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .menuAnchor(MenuAnchorType.PrimaryEditable, enabled = true)
+                                    .onFocusChanged { focusState ->
+                                        val nowFocused = focusState.isFocused
+                                        if (nowFocused && filteredScopes.isNotEmpty()) {
+                                            scopeMenuExpanded = true
+                                        } else if (scopeFocused && !nowFocused) {
+                                            scopeMenuExpanded = false
+                                            if (scopeField != channel.regionScope) {
+                                                bleManager.setChannelRegionScope(channel.index, scopeField)
+                                                infoBanner = "Scope fuer Kanal ${channel.index} gespeichert."
+                                            }
+                                        }
+                                        scopeFocused = nowFocused
+                                    },
+                                placeholder = { Text("Scope / Region (z. B. de-nw, nrw, oder frei eintippen)") },
                                 singleLine = true
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            OutlinedButton(onClick = {
-                                bleManager.setChannelRegionScope(channel.index, scopeField)
-                                infoBanner = "Scope fuer Kanal ${channel.index} gespeichert."
-                            }) {
-                                Text("Scope")
+                            ExposedDropdownMenu(
+                                expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                                onDismissRequest = { scopeMenuExpanded = false }
+                            ) {
+                                filteredScopes.forEach { candidateScope ->
+                                    DropdownMenuItem(
+                                        text = { Text(candidateScope) },
+                                        onClick = {
+                                            scopeField = candidateScope
+                                            scopeMenuExpanded = false
+                                            bleManager.setChannelRegionScope(channel.index, candidateScope)
+                                            infoBanner = "Scope '$candidateScope' fuer Kanal ${channel.index} gespeichert."
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
