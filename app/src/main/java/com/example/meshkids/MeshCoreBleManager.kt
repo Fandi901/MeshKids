@@ -91,7 +91,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "2.2"
+        const val APP_VERSION: String = "2.3"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -521,15 +521,15 @@ class MeshCoreBleManager(private val context: Context) {
         val hasLeadingHash = cleanedBasic.startsWith("#")
         val withoutLeadingHash = cleanedBasic.removePrefix("#").trim()
 
-        // Cut at any marker or symbol sequence that starts trailing garbage (like ")E%B[_~^}" or "schis..." or "=j!qq")
+        // Cut only at explicit garbage markers/symbols (never inside valid words like "Frischis")
         val markerCut = withoutLeadingHash
             .replace(Regex("\\)[A-Za-z0-9%\\[_~^}\\!\\?\\=\\+\\/\\$\\*\\@\\#].*$"), "")
-            .substringBefore("schis")
-            .substringBefore("yLn")
+            .replace(Regex("yLn=[a-zA-Z0-9=+!?/\\)_\\[\\]~^}\$-]*$"), "")
+            .replace(Regex("(?i)(?:^|(?<=[a-z0-9]))(?:n?schis|yLn)[a-zA-Z0-9=+!?/\\)_\\[\\]~^}\$-]*$"), "")
+            .replace(Regex("[)=!?%\\[_~^}\\+\\/\\$\\*\\@\\#].*$"), "")
             .trim()
 
         val allowedOnly = markerCut
-            .replace(Regex("(?i)(?:n?schis|yLn)[a-zA-Z0-9=+!?/\\)_\\[\\]~^}\$-]*$"), "")
             .filter { ch ->
                 ch.isLetterOrDigit() || ch == '-' || ch == '_' || ch == ' '
             }
