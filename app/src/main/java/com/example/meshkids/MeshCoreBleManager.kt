@@ -456,7 +456,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private fun sanitizeChannelName(input: String): String {
-        val beforeNull = input.substringBefore(' ')
+        val beforeNull = input.substringBefore('\u0000')
         val sb = StringBuilder(beforeNull.length)
         var i = 0
         while (i < beforeNull.length) {
@@ -479,7 +479,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        return sb.toString().replace(Regex("\s+"), " ").trim()
+        return sb.toString().replace(Regex("\\s+"), " ").trim()
     }
 
     private fun loadPersistedUnreadTargetIds(): Set<String> {
@@ -1545,7 +1545,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private fun decodeCleanUtf8(bytes: ByteArray): String {
-        val raw = String(bytes, Charsets.UTF_8).trimEnd(' ')
+        val raw = String(bytes, Charsets.UTF_8).trimEnd('\u0000')
         return sanitizeText(raw)
     }
 
@@ -1563,8 +1563,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        return sb.toString().replace('', ' ').replace('
-', ' ').trim()
+        return sb.toString().replace('\r', ' ').replace('\n', ' ').trim()
     }
 
     private fun addIncomingContactMessageIfAllowed(prefixHex: String, text: String, msgTimestampMs: Long = System.currentTimeMillis()) {

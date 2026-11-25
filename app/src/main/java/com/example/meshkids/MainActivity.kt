@@ -1003,7 +1003,7 @@ fun ParentSettingsScreen(
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .menuAnchor(MenuAnchorType.PrimaryEditable, enabled = true)
+                                    .menuAnchor()
                                     .onFocusChanged { focusState ->
                                         val nowFocused = focusState.isFocused
                                         if (nowFocused && filteredScopes.isNotEmpty()) {
