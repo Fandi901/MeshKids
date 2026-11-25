@@ -92,7 +92,8 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "2.5"
+        const val APP_VERSION: String = "2.6"
+        const val MAX_CHANNELS: Int = 32
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -477,7 +478,7 @@ class MeshCoreBleManager(private val context: Context) {
 
     private fun loadCachedDeviceChannels(): List<MeshChannel> {
         val allowedSet = prefs.getStringSet("allowed_channels", emptySet()) ?: emptySet()
-        return (0..7).mapNotNull { idx ->
+        return (0 until MAX_CHANNELS).mapNotNull { idx ->
             val rawDeviceName = prefs.getString("device_channel_name_$idx", null)
             val deviceName = rawDeviceName?.let { sanitizeChannelName(it) }
             if (deviceName.isNullOrBlank()) {
@@ -965,7 +966,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun syncChannelsFromDevice() {
-        for (idx in 0..7) {
+        for (idx in 0 until MAX_CHANNELS) {
             enqueueCommand(byteArrayOf(CMD_GET_CHANNEL, idx.toByte()))
         }
     }
@@ -1549,7 +1550,7 @@ class MeshCoreBleManager(private val context: Context) {
             RESP_CHANNEL_INFO -> {
                 if (frame.size >= 34) {
                     val idx = frame[1].toInt() and 0xFF
-                    if (idx in 0..7) {
+                    if (idx in 0 until MAX_CHANNELS) {
                         val nameSlice = frame.copyOfRange(2, 34)
                         val zeroIdx = nameSlice.indexOf(0.toByte()).let { if (it >= 0) it else nameSlice.size }
                         val rawNameUtf8 = String(nameSlice, 0, zeroIdx, Charsets.UTF_8)

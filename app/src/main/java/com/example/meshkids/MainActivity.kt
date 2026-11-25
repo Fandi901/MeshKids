@@ -131,7 +131,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     val unreadTargetIds by bleManager.unreadTargetIds.collectAsState()
     val alertCounter by bleManager.incomingAlertCounter.collectAsState()
 
-    val allowedTargets = remember(allContacts, allChannels) {
+    val allowedTargets = remember(allContacts, allChannels, messages, unreadTargetIds) {
         val channelTargets = allChannels.filter { it.isAllowedForKid }.map {
             ChatTarget(
                 type = ChatTargetType.CHANNEL,
@@ -148,7 +148,17 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                 contact = it
             )
         }
-        channelTargets + contactTargets
+        val latestTsByTarget = mutableMapOf<String, Long>()
+        for (m in messages) {
+            val prev = latestTsByTarget[m.targetId]
+            if (prev == null || m.timestamp > prev) {
+                latestTsByTarget[m.targetId] = m.timestamp
+            }
+        }
+        (channelTargets + contactTargets).sortedWith(
+            compareByDescending<ChatTarget> { unreadTargetIds.contains(it.id) }
+                .thenByDescending { latestTsByTarget[it.id] ?: 0L }
+        )
     }
 
     val messages by bleManager.messages.collectAsState()
@@ -528,26 +538,86 @@ fun ParentPinDialog(
     var enteredPin by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
 
+    fun appendDigit(d: String) {
+        if (enteredPin.length < 12) {
+            enteredPin += d
+            error = false
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Admin-Bereich geschützt") },
         text = {
-            Column {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Bitte Admin-PIN eingeben (Standard: 1234):")
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 OutlinedTextField(
                     value = enteredPin,
-                    onValueChange = {
-                        enteredPin = it
+                    onValueChange = { raw ->
+                        enteredPin = raw.filter { it.isDigit() }.take(12)
                         error = false
                     },
+                    modifier = Modifier.fillMaxWidth(),
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     singleLine = true,
                     isError = error
                 )
                 if (error) {
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text("Falsche PIN!", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+
+                val rows = listOf(
+                    listOf("1", "2", "3"),
+                    listOf("4", "5", "6"),
+                    listOf("7", "8", "9"),
+                    listOf("⌫", "0", "OK")
+                )
+                rows.forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        row.forEach { key ->
+                            val isOk = key == "OK"
+                            val isBack = key == "⌫"
+                            if (isOk) {
+                                Button(
+                                    onClick = {
+                                        if (pinManager.verifyPin(enteredPin)) onUnlocked() else error = true
+                                    },
+                                    modifier = Modifier.weight(1f).height(46.dp),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text(key, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                                }
+                            } else if (isBack) {
+                                OutlinedButton(
+                                    onClick = {
+                                        if (enteredPin.isNotEmpty()) {
+                                            enteredPin = enteredPin.dropLast(1)
+                                            error = false
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f).height(46.dp),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text(key, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                }
+                            } else {
+                                FilledTonalButton(
+                                    onClick = { appendDigit(key) },
+                                    modifier = Modifier.weight(1f).height(46.dp),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text(key, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         },
