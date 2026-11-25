@@ -186,6 +186,8 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
         ParentSettingsScreen(
             bleManager = bleManager,
             pinManager = pinManager,
+            checkBlePermissionsGranted = { checkBlePermissionsGranted() },
+            requestBlePermissions = { perms -> permissionLauncher.launch(perms) },
             onBack = { showParentSettings = false }
         )
         return
@@ -567,6 +569,8 @@ fun ParentPinDialog(
 fun ParentSettingsScreen(
     bleManager: MeshCoreBleManager,
     pinManager: ParentPinManager,
+    checkBlePermissionsGranted: () -> Boolean,
+    requestBlePermissions: (Array<String>) -> Unit,
     onBack: () -> Unit
 ) {
     val devices by bleManager.discoveredDevices.collectAsState()
@@ -636,7 +640,7 @@ fun ParentSettingsScreen(
                                 arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
                             }
                             infoBanner = "Bitte Bluetooth-Berechtigungen erteilen..."
-                            permissionLauncher.launch(perms)
+                            requestBlePermissions(perms)
                         } else {
                             val started = bleManager.startScan()
                             infoBanner = if (started) {
