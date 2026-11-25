@@ -201,7 +201,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (selectedTarget != null) {
                             IconButton(onClick = { selectedTargetId = null }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurueck", tint = Color.White)
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurück", tint = Color.White)
                             }
                         }
                         Column {
@@ -212,7 +212,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                                 color = Color.White
                             )
                             Text(
-                                text = if (isConnected) "Funkgeraet bereit" else connectionState,
+                                text = if (isConnected) "Funkgerät bereit" else connectionState,
                                 fontSize = 13.sp,
                                 color = if (isConnected) Color(0xFFB9F6CA) else Color(0xFFFFCDD2)
                             )
@@ -422,12 +422,12 @@ fun KidChatScreen(
                 }
                 val textColor = if (msg.isFromMe) Color.White else Color.Black
                 val statusLabel = when {
-                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> "Vom Repeater gehoert"
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> "Vom Repeater gehört"
                     msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> "Sende / warte auf Repeater..."
                     isGroupMsg -> "Gesendet (Gruppe)"
                     msg.deliveryStatus == DeliveryStatus.DELIVERED -> "Zugestellt"
-                    msg.deliveryStatus == DeliveryStatus.FAILED -> "Keine Zustellbestaetigung"
-                    else -> "Warte auf Zustellbestaetigung..."
+                    msg.deliveryStatus == DeliveryStatus.FAILED -> "Keine Zustellbestätigung"
+                    else -> "Warte auf Zustellbestätigung..."
                 }
                 val statusColor = when {
                     msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> greenDeliveredColor
@@ -530,7 +530,7 @@ fun ParentPinDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Admin-Bereich geschuetzt") },
+        title = { Text("Admin-Bereich geschützt") },
         text = {
             Column {
                 Text("Bitte Admin-PIN eingeben (Standard: 1234):")
@@ -601,7 +601,7 @@ fun ParentSettingsScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurueck")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurück")
                     }
                 }
             )
@@ -629,7 +629,7 @@ fun ParentSettingsScreen(
             }
 
             item {
-                Text("1. MeshCore Funkgeraet koppeln ($connectionState)", fontWeight = FontWeight.Bold)
+                Text("1. MeshCore Funkgerät koppeln ($connectionState)", fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
@@ -644,7 +644,7 @@ fun ParentSettingsScreen(
                         } else {
                             val started = bleManager.startScan()
                             infoBanner = if (started) {
-                                "BLE-Suche laeuft (8 Sek.)..."
+                                "BLE-Suche läuft (8 Sek.)..."
                             } else {
                                 bleManager.connectionState.value
                             }
@@ -654,7 +654,7 @@ fun ParentSettingsScreen(
                     }
                     OutlinedButton(onClick = {
                         bleManager.sendAdvertNow()
-                        infoBanner = "Geraetesignal (Advert) gesendet."
+                        infoBanner = "Gerätesignal (Advert) gesendet."
                     }) {
                         Text("Advert senden")
                     }
@@ -666,7 +666,7 @@ fun ParentSettingsScreen(
                     onClick = { bleManager.connectToDevice(device) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("${device.name ?: "MeshCore Geraet"} (${device.address})")
+                    Text("${device.name ?: "MeshCore Gerät"} (${device.address})")
                 }
             }
 
@@ -676,7 +676,7 @@ fun ParentSettingsScreen(
                 Text("2. Kontakte & Alias-Namen (z. B. Mama, Papa)", fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedButton(onClick = { bleManager.syncContacts() }) {
-                    Text("Kontakte vom Funkgeraet laden")
+                    Text("Kontakte vom Funkgerät laden")
                 }
             }
 
@@ -688,6 +688,7 @@ fun ParentSettingsScreen(
                 val sortedContacts = remember(contacts, contactSearch) {
                     val q = contactSearch.trim().lowercase()
                     contacts
+                        .filter { c -> c.nodeType != 2 }
                         .filter { c ->
                             q.isEmpty() ||
                                 c.displayName.lowercase().contains(q) ||
@@ -738,7 +739,7 @@ fun ParentSettingsScreen(
                                 onClick = { if (safePage > 0) contactPage = safePage - 1 },
                                 enabled = safePage > 0
                             ) {
-                                Text("◀ Zurueck")
+                                Text("◀ Zurück")
                             }
                             Text(
                                 text = "Seite ${safePage + 1} / $totalPages (${sortedContacts.size} Kontakte)",
@@ -773,9 +774,10 @@ fun ParentSettingsScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
+                                            val typeTag = if (contact.nodeType == 3) " • Roomserver" else ""
                                             Text(text = contact.displayName, fontWeight = FontWeight.SemiBold)
                                             Text(
-                                                text = "${contact.originalName} (${contact.pubKeyPrefixHex})",
+                                                text = "${contact.originalName} (${contact.pubKeyPrefixHex})$typeTag",
                                                 fontSize = 12.sp,
                                                 color = Color.Gray
                                             )
@@ -797,7 +799,7 @@ fun ParentSettingsScreen(
                                                 val nowFocused = focusState.isFocused
                                                 if (aliasFocused && !nowFocused && aliasField != contact.aliasName) {
                                                     bleManager.setContactAlias(contact.pubKeyPrefixHex, aliasField)
-                                                    infoBanner = "Alias fuer Kontakt gespeichert."
+                                                    infoBanner = "Alias für Kontakt gespeichert."
                                                 }
                                                 aliasFocused = nowFocused
                                             },
@@ -819,7 +821,7 @@ fun ParentSettingsScreen(
                                     onClick = { if (safePage > 0) contactPage = safePage - 1 },
                                     enabled = safePage > 0
                                 ) {
-                                    Text("◀ Zurueck")
+                                    Text("◀ Zurück")
                                 }
                                 Text(
                                     text = "Seite ${safePage + 1} / $totalPages",
@@ -840,8 +842,8 @@ fun ParentSettingsScreen(
 
             item {
                 Spacer(modifier = Modifier.height(10.dp))
-                Text("Zusaetzliche Alias-Namen nur fuer Gruppenchats (ohne Geraete-Kontakt)", fontWeight = FontWeight.SemiBold)
-                Text("Falls ein Absender aus dem Chat nicht in der Geraete-Kontaktliste steht, hier Namen aus dem Chat und Alias eintragen.", fontSize = 12.sp, color = Color.Gray)
+                Text("Zusätzliche Alias-Namen nur für Gruppenchats (ohne Geräte-Kontakt)", fontWeight = FontWeight.SemiBold)
+                Text("Falls ein Absender aus dem Chat nicht in der Geräte-Kontaktliste steht, hier Namen aus dem Chat und Alias eintragen.", fontSize = 12.sp, color = Color.Gray)
                 Spacer(modifier = Modifier.height(6.dp))
                 OutlinedTextField(
                     value = manualChatName,
@@ -856,19 +858,19 @@ fun ParentSettingsScreen(
                         value = manualAliasName,
                         onValueChange = { if (it.length <= 24) manualAliasName = it },
                         modifier = Modifier.weight(1f),
-                        placeholder = { Text("Gewuenschter Alias (z. B. Dieter)") },
+                        placeholder = { Text("Gewünschter Alias (z. B. Dieter)") },
                         singleLine = true
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(onClick = {
                         if (manualChatName.isNotBlank() && manualAliasName.isNotBlank()) {
                             bleManager.addOrUpdateManualGroupAlias(manualChatName, manualAliasName)
-                            infoBanner = "Gruppen-Alias '${manualAliasName.trim()}' fuer '${manualChatName.trim()}' gespeichert."
+                            infoBanner = "Gruppen-Alias '${manualAliasName.trim()}' für '${manualChatName.trim()}' gespeichert."
                             manualChatName = ""
                             manualAliasName = ""
                         }
                     }) {
-                        Text("Hinzufuegen")
+                        Text("Hinzufügen")
                     }
                 }
             }
@@ -885,9 +887,9 @@ fun ParentSettingsScreen(
                     }
                     TextButton(onClick = {
                         bleManager.removeManualGroupAlias(entry.key)
-                        infoBanner = "Gruppen-Alias fuer '${entry.key}' entfernt."
+                        infoBanner = "Gruppen-Alias für '${entry.key}' entfernt."
                     }) {
-                        Text("Loeschen")
+                        Text("Löschen")
                     }
                 }
             }
@@ -895,145 +897,253 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("3. Gruppenchat / Kanaele aus Geraet uebernehmen", fontWeight = FontWeight.Bold)
-                Text("Kanaele werden nur aus dem Funkgeraet ausgelesen und nicht neu angelegt oder ueberschrieben. Du kannst hier einen Alias vergeben und den Chat freigeben.", fontSize = 13.sp, color = Color.Gray)
+                Text("3. Gruppenchat / Kanäle aus Gerät übernehmen", fontWeight = FontWeight.Bold)
+                Text("Kanäle werden nur aus dem Funkgerät ausgelesen und nicht neu angelegt oder überschrieben. Du kannst hier einen Alias vergeben und den Chat freigeben.", fontSize = 13.sp, color = Color.Gray)
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(onClick = {
                     bleManager.syncChannelsFromDevice()
-                    infoBanner = "Kanaele werden aus dem Funkgeraet geladen..."
+                    infoBanner = "Kanäle werden aus dem Funkgerät geladen..."
                 }) {
-                    Text("Kanaele aus Geraet laden")
+                    Text("Kanäle aus Gerät laden")
                 }
                 if (channels.isEmpty()) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Noch keine Kanaele vom Geraet uebernommen. Bitte mit Funkgeraet verbinden und auf 'Kanaele aus Geraet laden' tippen.",
+                        text = "Noch keine Kanäle vom Gerät übernommen. Bitte mit Funkgerät verbinden und auf 'Kanäle aus Gerät laden' tippen.",
                         fontSize = 13.sp,
                         color = Color.Gray
                     )
                 }
             }
 
-            items(channels) { channel ->
-                var aliasField by remember(channel.index, channel.aliasName) {
-                    mutableStateOf(channel.aliasName)
+            item {
+                var channelSearch by remember { mutableStateOf("") }
+                var channelPage by remember { mutableStateOf(0) }
+                val channelPageSize = 5
+
+                val sortedChannels = remember(channels, channelSearch) {
+                    val q = channelSearch.trim().lowercase()
+                    channels
+                        .filter { ch ->
+                            q.isEmpty() ||
+                                ch.displayName.lowercase().contains(q) ||
+                                ch.originalName.lowercase().contains(q) ||
+                                ch.regionScope.lowercase().contains(q) ||
+                                ch.index.toString() == q
+                        }
+                        .sortedWith(
+                            compareByDescending<MeshChannel> { it.isAllowedForKid }
+                                .thenBy { it.index }
+                        )
                 }
-                var scopeField by remember(channel.index, channel.regionScope) {
-                    mutableStateOf(channel.regionScope)
+
+                val totalChannelPages = ((sortedChannels.size + channelPageSize - 1) / channelPageSize).coerceAtLeast(1)
+                val safeChannelPage = channelPage.coerceIn(0, totalChannelPages - 1)
+                LaunchedEffect(totalChannelPages) {
+                    if (channelPage >= totalChannelPages) channelPage = (totalChannelPages - 1).coerceAtLeast(0)
                 }
+
+                val pageChannels = remember(sortedChannels, safeChannelPage) {
+                    val fromIdx = safeChannelPage * channelPageSize
+                    val toIdx = minOf(fromIdx + channelPageSize, sortedChannels.size)
+                    if (fromIdx < toIdx) sortedChannels.subList(fromIdx, toIdx) else emptyList()
+                }
+
                 Card(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FBFD))
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF7FAFC))
                 ) {
                     Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        OutlinedTextField(
+                            value = channelSearch,
+                            onValueChange = {
+                                channelSearch = it
+                                channelPage = 0
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("Kanäle filtern (Name, Scope oder Nr.)...") },
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = "Kanal ${channel.index}: ${channel.displayName}", fontWeight = FontWeight.Bold)
-                                Text(
-                                    text = "Geraetekanal: ${channel.originalName} • ${if (channel.isEncryptedPskSet) "PSK im Geraet" else "Offen / kein PSK"}",
-                                    fontSize = 12.sp,
-                                    color = Color.Gray
-                                )
-                                Text(
-                                    text = "Scope / Region: ${channel.regionScope.ifBlank { "Standard" }}",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF1565C0)
-                                )
+                            OutlinedButton(
+                                onClick = { if (safeChannelPage > 0) channelPage = safeChannelPage - 1 },
+                                enabled = safeChannelPage > 0
+                            ) {
+                                Text("◀ Zurück")
                             }
-                            Switch(
-                                checked = channel.isAllowedForKid,
-                                onCheckedChange = { bleManager.toggleChannelAllowed(channel.index, it) }
+                            Text(
+                                text = "Seite ${safeChannelPage + 1} / $totalChannelPages (${sortedChannels.size} Kanäle)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        var chAliasFocused by remember(channel.index) { mutableStateOf(false) }
-                        OutlinedTextField(
-                            value = aliasField,
-                            onValueChange = { aliasField = it },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .onFocusChanged { focusState ->
-                                    val nowFocused = focusState.isFocused
-                                    if (chAliasFocused && !nowFocused && aliasField != channel.aliasName) {
-                                        bleManager.setChannelAlias(channel.index, aliasField)
-                                        infoBanner = "Alias fuer Kanal ${channel.index} gespeichert."
-                                    }
-                                    chAliasFocused = nowFocused
-                                },
-                            placeholder = { Text("Alias (z. B. Familie) – wird beim Verlassen gespeichert") },
-                            singleLine = true
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        var scopeFocused by remember(channel.index) { mutableStateOf(false) }
-                        var scopeMenuExpanded by remember(channel.index) { mutableStateOf(false) }
-                        val filteredScopes = remember(scopeField) {
-                            val q = scopeField.trim().lowercase()
-                            if (q.isEmpty()) {
-                                MeshCoreBleManager.KNOWN_SCOPES.take(10)
-                            } else {
-                                val startsWithMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
-                                    it.lowercase().startsWith(q)
-                                }
-                                val containsMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
-                                    !it.lowercase().startsWith(q) && it.lowercase().contains(q)
-                                }
-                                (startsWithMatches + containsMatches).take(10)
+                            OutlinedButton(
+                                onClick = { if (safeChannelPage < totalChannelPages - 1) channelPage = safeChannelPage + 1 },
+                                enabled = safeChannelPage < totalChannelPages - 1
+                            ) {
+                                Text("Weiter ▶")
                             }
                         }
 
-                        ExposedDropdownMenuBox(
-                            expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
-                            onExpandedChange = { expanded ->
-                                scopeMenuExpanded = expanded && filteredScopes.isNotEmpty()
-                            }
-                        ) {
-                            OutlinedTextField(
-                                value = scopeField,
-                                onValueChange = { raw ->
-                                    if (raw.length <= 32) {
-                                        scopeField = raw
-                                        scopeMenuExpanded = filteredScopes.isNotEmpty()
+                        if (pageChannels.isEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Keine Kanäle gefunden.",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        } else {
+                            pageChannels.forEach { channel ->
+                                var aliasField by remember(channel.index, channel.aliasName) {
+                                    mutableStateOf(channel.aliasName)
+                                }
+                                var scopeField by remember(channel.index, channel.regionScope) {
+                                    mutableStateOf(channel.regionScope)
+                                }
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(text = "Kanal ${channel.index}: ${channel.displayName}", fontWeight = FontWeight.Bold)
+                                            Text(
+                                                text = "Gerätekanal: ${channel.originalName} • ${if (channel.isEncryptedPskSet) "PSK im Gerät" else "Offen / kein PSK"}",
+                                                fontSize = 12.sp,
+                                                color = Color.Gray
+                                            )
+                                            Text(
+                                                text = "Scope / Region: ${channel.regionScope.ifBlank { "Standard" }}",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF1565C0)
+                                            )
+                                        }
+                                        Switch(
+                                            checked = channel.isAllowedForKid,
+                                            onCheckedChange = { bleManager.toggleChannelAllowed(channel.index, it) }
+                                        )
                                     }
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .menuAnchor()
-                                    .onFocusChanged { focusState ->
-                                        val nowFocused = focusState.isFocused
-                                        if (nowFocused && filteredScopes.isNotEmpty()) {
-                                            scopeMenuExpanded = true
-                                        } else if (scopeFocused && !nowFocused) {
-                                            scopeMenuExpanded = false
-                                            if (scopeField != channel.regionScope) {
-                                                bleManager.setChannelRegionScope(channel.index, scopeField)
-                                                infoBanner = "Scope fuer Kanal ${channel.index} gespeichert."
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    var chAliasFocused by remember(channel.index) { mutableStateOf(false) }
+                                    OutlinedTextField(
+                                        value = aliasField,
+                                        onValueChange = { aliasField = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .onFocusChanged { focusState ->
+                                                val nowFocused = focusState.isFocused
+                                                if (chAliasFocused && !nowFocused && aliasField != channel.aliasName) {
+                                                    bleManager.setChannelAlias(channel.index, aliasField)
+                                                    infoBanner = "Alias für Kanal ${channel.index} gespeichert."
+                                                }
+                                                chAliasFocused = nowFocused
+                                            },
+                                        placeholder = { Text("Alias (z. B. Familie) – wird beim Verlassen gespeichert") },
+                                        singleLine = true
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    var scopeFocused by remember(channel.index) { mutableStateOf(false) }
+                                    var scopeMenuExpanded by remember(channel.index) { mutableStateOf(false) }
+                                    val filteredScopes = remember(scopeField) {
+                                        val q = scopeField.trim().lowercase()
+                                        if (q.isEmpty()) {
+                                            MeshCoreBleManager.KNOWN_SCOPES.take(10)
+                                        } else {
+                                            val startsWithMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                                                it.lowercase().startsWith(q)
+                                            }
+                                            val containsMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                                                !it.lowercase().startsWith(q) && it.lowercase().contains(q)
+                                            }
+                                            (startsWithMatches + containsMatches).take(10)
+                                        }
+                                    }
+
+                                    ExposedDropdownMenuBox(
+                                        expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                                        onExpandedChange = { expanded ->
+                                            scopeMenuExpanded = expanded && filteredScopes.isNotEmpty()
+                                        }
+                                    ) {
+                                        OutlinedTextField(
+                                            value = scopeField,
+                                            onValueChange = { raw ->
+                                                if (raw.length <= 32) {
+                                                    scopeField = raw
+                                                    scopeMenuExpanded = filteredScopes.isNotEmpty()
+                                                }
+                                            },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .menuAnchor()
+                                                .onFocusChanged { focusState ->
+                                                    val nowFocused = focusState.isFocused
+                                                    if (nowFocused && filteredScopes.isNotEmpty()) {
+                                                        scopeMenuExpanded = true
+                                                    } else if (scopeFocused && !nowFocused) {
+                                                        scopeMenuExpanded = false
+                                                        if (scopeField != channel.regionScope) {
+                                                            bleManager.setChannelRegionScope(channel.index, scopeField)
+                                                            infoBanner = "Scope für Kanal ${channel.index} gespeichert."
+                                                        }
+                                                    }
+                                                    scopeFocused = nowFocused
+                                                },
+                                            placeholder = { Text("Scope / Region (z. B. de-nw, nrw, oder frei eintippen)") },
+                                            singleLine = true
+                                        )
+                                        ExposedDropdownMenu(
+                                            expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                                            onDismissRequest = { scopeMenuExpanded = false }
+                                        ) {
+                                            filteredScopes.forEach { candidateScope ->
+                                                DropdownMenuItem(
+                                                    text = { Text(candidateScope) },
+                                                    onClick = {
+                                                        scopeField = candidateScope
+                                                        scopeMenuExpanded = false
+                                                        bleManager.setChannelRegionScope(channel.index, candidateScope)
+                                                        infoBanner = "Scope '$candidateScope' für Kanal ${channel.index} gespeichert."
+                                                    }
+                                                )
                                             }
                                         }
-                                        scopeFocused = nowFocused
-                                    },
-                                placeholder = { Text("Scope / Region (z. B. de-nw, nrw, oder frei eintippen)") },
-                                singleLine = true
-                            )
-                            ExposedDropdownMenu(
-                                expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
-                                onDismissRequest = { scopeMenuExpanded = false }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (totalChannelPages > 1) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                filteredScopes.forEach { candidateScope ->
-                                    DropdownMenuItem(
-                                        text = { Text(candidateScope) },
-                                        onClick = {
-                                            scopeField = candidateScope
-                                            scopeMenuExpanded = false
-                                            bleManager.setChannelRegionScope(channel.index, candidateScope)
-                                            infoBanner = "Scope '$candidateScope' fuer Kanal ${channel.index} gespeichert."
-                                        }
-                                    )
+                                OutlinedButton(
+                                    onClick = { if (safeChannelPage > 0) channelPage = safeChannelPage - 1 },
+                                    enabled = safeChannelPage > 0
+                                ) {
+                                    Text("◀ Zurück")
+                                }
+                                Text(
+                                    text = "Seite ${safeChannelPage + 1} / $totalChannelPages",
+                                    fontSize = 13.sp,
+                                    color = Color.Gray
+                                )
+                                OutlinedButton(
+                                    onClick = { if (safeChannelPage < totalChannelPages - 1) channelPage = safeChannelPage + 1 },
+                                    enabled = safeChannelPage < totalChannelPages - 1
+                                ) {
+                                    Text("Weiter ▶")
                                 }
                             }
                         }
@@ -1057,7 +1167,7 @@ fun ParentSettingsScreen(
                     Button(onClick = {
                         if (kidName.isNotBlank()) {
                             bleManager.setKidNodeName(kidName)
-                            infoBanner = "Geraetename '$kidName' gesetzt."
+                            infoBanner = "Gerätename '$kidName' gesetzt."
                         }
                     }) {
                         Text("Speichern")
@@ -1068,7 +1178,7 @@ fun ParentSettingsScreen(
             item {
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("5. Admin-PIN aendern", fontWeight = FontWeight.Bold)
+                Text("5. Admin-PIN ändern", fontWeight = FontWeight.Bold)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = newPin,
@@ -1083,7 +1193,7 @@ fun ParentSettingsScreen(
                         if (newPin.length >= 4) {
                             pinManager.setPin(newPin)
                             newPin = ""
-                            infoBanner = "Admin-PIN wurde geaendert."
+                            infoBanner = "Admin-PIN wurde geändert."
                         }
                     }) {
                         Text("PIN setzen")
@@ -1101,7 +1211,7 @@ fun ParentSettingsScreen(
                 var reply4 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(3) { "" }) }
 
                 Text("6. Voreingestellte Schnelltexte (unten im Chat)", fontWeight = FontWeight.Bold)
-                Text("Diese Felder erscheinen direkt ueber dem Eingabefeld im Chat und koennen angepasst werden.", fontSize = 13.sp, color = Color.Gray)
+                Text("Diese Felder erscheinen direkt über dem Eingabefeld im Chat und können angepasst werden.", fontSize = 13.sp, color = Color.Gray)
                 Spacer(modifier = Modifier.height(8.dp))
 
                 OutlinedTextField(

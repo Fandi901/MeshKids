@@ -39,7 +39,8 @@ data class MeshContact(
     val pubKeyPrefixBytes: ByteArray,
     val originalName: String,
     val aliasName: String,
-    val isAllowedForKid: Boolean = false
+    val isAllowedForKid: Boolean = false,
+    val nodeType: Int = 1 // 1 = Chat/Kontakt, 2 = Repeater, 3 = Room Server
 ) {
     val displayName: String
         get() = aliasName.trim().ifBlank { originalName.trim() }
@@ -91,7 +92,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "2.4"
+        const val APP_VERSION: String = "2.5"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -266,6 +267,7 @@ class MeshCoreBleManager(private val context: Context) {
                     put("originalName", c.originalName)
                     put("aliasName", c.aliasName)
                     put("isAllowedForKid", c.isAllowedForKid)
+                    put("nodeType", c.nodeType)
                 }
                 arr.put(obj)
             }
@@ -294,7 +296,10 @@ class MeshCoreBleManager(private val context: Context) {
                 val savedAlias = prefs.getString("contact_alias_$prefixHex", null)
                     ?: obj.optString("aliasName", "")
                 val isAllowed = allowedSet.contains(prefixHex) || obj.optBoolean("isAllowedForKid", false)
-                result.add(MeshContact(prefixHex, prefixBytes, origName, savedAlias, isAllowed))
+                val nodeType = obj.optInt("nodeType", 1)
+                if (nodeType != 2) {
+                    result.add(MeshContact(prefixHex, prefixBytes, origName, savedAlias, isAllowed, nodeType))
+                }
             }
             result
         } catch (_: Exception) {
@@ -697,13 +702,13 @@ class MeshCoreBleManager(private val context: Context) {
                 android.Manifest.permission.BLUETOOTH_SCAN
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED
             if (!hasScan) {
-                _connectionState.value = "Berechtigung 'Geraete in der Naehe' fehlt"
+                _connectionState.value = "Berechtigung 'Geräte in der Nähe' fehlt"
                 return false
             }
         }
         val scanner = adapter.bluetoothLeScanner
         if (scanner == null) {
-            _connectionState.value = "BLE-Scanner nicht verfuegbar"
+            _connectionState.value = "BLE-Scanner nicht verfügbar"
             return false
         }
 
@@ -1514,20 +1519,31 @@ class MeshCoreBleManager(private val context: Context) {
             }
             RESP_CONTACT -> {
                 if (frame.size >= 132) {
+                    // MeshCore RESP_CONTACT: [0]=0x03, [1..32]=pubKey (32B), [33]=type (1=Chat, 2=Repeater, 3=RoomServer)
+                    val nodeType = if (frame.size > 33) (frame[33].toInt() and 0xFF) else 1
                     val prefixBytes = frame.copyOfRange(1, 7)
                     val prefixHex = prefixBytes.joinToString("") { "%02x".format(it) }
-                    val nameBytes = frame.copyOfRange(100, 132)
-                    val origName = decodeCleanUtf8(nameBytes).ifBlank { "Node $prefixHex" }
-                    val aliasName = prefs.getString("contact_alias_$prefixHex", "") ?: ""
+                    if (nodeType == 2) {
+                        // Repeater herausfiltern (nur Kontakte & Roomserver behalten)
+                        val filtered = _contacts.value.filterNot { it.pubKeyPrefixHex == prefixHex }
+                        if (filtered.size != _contacts.value.size) {
+                            _contacts.value = filtered
+                            saveCachedContacts(filtered)
+                        }
+                    } else {
+                        val nameBytes = frame.copyOfRange(100, 132)
+                        val origName = decodeCleanUtf8(nameBytes).ifBlank { "Node $prefixHex" }
+                        val aliasName = prefs.getString("contact_alias_$prefixHex", "") ?: ""
 
-                    val allowedSet = prefs.getStringSet("allowed_contacts", emptySet()) ?: emptySet()
-                    val isAllowed = allowedSet.contains(prefixHex)
+                        val allowedSet = prefs.getStringSet("allowed_contacts", emptySet()) ?: emptySet()
+                        val isAllowed = allowedSet.contains(prefixHex)
 
-                    val updated = _contacts.value.filterNot { it.pubKeyPrefixHex == prefixHex } +
-                            MeshContact(prefixHex, prefixBytes, origName, aliasName, isAllowed)
-                    _contacts.value = updated
-                    saveCachedContacts(updated)
-                    refreshExistingMessageSenderNames(updated)
+                        val updated = _contacts.value.filterNot { it.pubKeyPrefixHex == prefixHex } +
+                                MeshContact(prefixHex, prefixBytes, origName, aliasName, isAllowed, nodeType)
+                        _contacts.value = updated
+                        saveCachedContacts(updated)
+                        refreshExistingMessageSenderNames(updated)
+                    }
                 }
             }
             RESP_CHANNEL_INFO -> {
