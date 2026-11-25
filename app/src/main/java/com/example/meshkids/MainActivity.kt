@@ -629,44 +629,164 @@ fun ParentSettingsScreen(
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("2. Kontakte & Alias-Namen (z. B. Mama, Papa)", fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
                 OutlinedButton(onClick = { bleManager.syncContacts() }) {
                     Text("Kontakte vom Funkgeraet laden")
                 }
             }
 
-            items(contacts) { contact ->
-                var aliasField by remember(contact.pubKeyPrefixHex, contact.aliasName) {
-                    mutableStateOf(contact.aliasName)
-                }
-                Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = contact.displayName, fontWeight = FontWeight.SemiBold)
-                            Text(text = "${contact.originalName} (${contact.pubKeyPrefixHex})", fontSize = 12.sp, color = Color.Gray)
+            item {
+                var contactSearch by remember { mutableStateOf("") }
+                var contactPage by remember { mutableStateOf(0) }
+                val pageSize = 10
+
+                val sortedContacts = remember(contacts, contactSearch) {
+                    val q = contactSearch.trim().lowercase()
+                    contacts
+                        .filter { c ->
+                            q.isEmpty() ||
+                                c.displayName.lowercase().contains(q) ||
+                                c.originalName.lowercase().contains(q) ||
+                                c.pubKeyPrefixHex.lowercase().contains(q)
                         }
-                        Switch(
-                            checked = contact.isAllowedForKid,
-                            onCheckedChange = { bleManager.toggleContactAllowed(contact.pubKeyPrefixHex, it) }
+                        .sortedWith(
+                            compareByDescending<MeshContact> { it.isAllowedForKid }
+                                .thenBy { it.displayName.lowercase() }
                         )
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                }
+
+                val totalPages = ((sortedContacts.size + pageSize - 1) / pageSize).coerceAtLeast(1)
+                val safePage = contactPage.coerceIn(0, totalPages - 1)
+                LaunchedEffect(totalPages) {
+                    if (contactPage >= totalPages) contactPage = (totalPages - 1).coerceAtLeast(0)
+                }
+
+                val pageContacts = remember(sortedContacts, safePage) {
+                    val fromIdx = safePage * pageSize
+                    val toIdx = minOf(fromIdx + pageSize, sortedContacts.size)
+                    if (fromIdx < toIdx) sortedContacts.subList(fromIdx, toIdx) else emptyList()
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF7FAFC))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                         OutlinedTextField(
-                            value = aliasField,
-                            onValueChange = { aliasField = it },
-                            modifier = Modifier.weight(1f),
-                            placeholder = { Text("Alias (z. B. Mama)") },
+                            value = contactSearch,
+                            onValueChange = {
+                                contactSearch = it
+                                contactPage = 0
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("Kontakte filtern (Name oder Hex)...") },
                             singleLine = true
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        OutlinedButton(onClick = {
-                            bleManager.setContactAlias(contact.pubKeyPrefixHex, aliasField)
-                            infoBanner = "Alias fuer Kontakt gespeichert."
-                        }) {
-                            Text("Alias")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            OutlinedButton(
+                                onClick = { if (safePage > 0) contactPage = safePage - 1 },
+                                enabled = safePage > 0
+                            ) {
+                                Text("◀ Zurueck")
+                            }
+                            Text(
+                                text = "Seite ${safePage + 1} / $totalPages (${sortedContacts.size} Kontakte)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            OutlinedButton(
+                                onClick = { if (safePage < totalPages - 1) contactPage = safePage + 1 },
+                                enabled = safePage < totalPages - 1
+                            ) {
+                                Text("Weiter ▶")
+                            }
+                        }
+
+                        if (pageContacts.isEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Keine Kontakte gefunden.",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        } else {
+                            pageContacts.forEach { contact ->
+                                var aliasField by remember(contact.pubKeyPrefixHex, contact.aliasName) {
+                                    mutableStateOf(contact.aliasName)
+                                }
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(text = contact.displayName, fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                text = "${contact.originalName} (${contact.pubKeyPrefixHex})",
+                                                fontSize = 12.sp,
+                                                color = Color.Gray
+                                            )
+                                        }
+                                        Switch(
+                                            checked = contact.isAllowedForKid,
+                                            onCheckedChange = {
+                                                bleManager.toggleContactAllowed(contact.pubKeyPrefixHex, it)
+                                            }
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        OutlinedTextField(
+                                            value = aliasField,
+                                            onValueChange = { aliasField = it },
+                                            modifier = Modifier.weight(1f),
+                                            placeholder = { Text("Alias (z. B. Mama)") },
+                                            singleLine = true
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        OutlinedButton(onClick = {
+                                            bleManager.setContactAlias(contact.pubKeyPrefixHex, aliasField)
+                                            infoBanner = "Alias fuer Kontakt gespeichert."
+                                        }) {
+                                            Text("Alias")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (totalPages > 1) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                OutlinedButton(
+                                    onClick = { if (safePage > 0) contactPage = safePage - 1 },
+                                    enabled = safePage > 0
+                                ) {
+                                    Text("◀ Zurueck")
+                                }
+                                Text(
+                                    text = "Seite ${safePage + 1} / $totalPages",
+                                    fontSize = 13.sp,
+                                    color = Color.Gray
+                                )
+                                OutlinedButton(
+                                    onClick = { if (safePage < totalPages - 1) contactPage = safePage + 1 },
+                                    enabled = safePage < totalPages - 1
+                                ) {
+                                    Text("Weiter ▶")
+                                }
+                            }
                         }
                     }
                 }

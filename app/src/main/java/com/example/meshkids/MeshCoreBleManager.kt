@@ -91,7 +91,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "1.5"
+        const val APP_VERSION: String = "1.6"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -883,7 +883,9 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun applyChannelFloodScope(regionScope: String) {
-        enqueueCommand(buildFloodScopePacket(regionScope))
+        if (regionScope.trim().isNotEmpty()) {
+            enqueueCommand(buildFloodScopePacket(regionScope))
+        }
     }
 
     fun setChannelRegionScope(channelIndex: Int, regionScope: String) {
@@ -992,7 +994,7 @@ class MeshCoreBleManager(private val context: Context) {
                 fun buildChannelPacket(txEpochSec: Int): ByteArray {
                     val buffer = ByteBuffer.allocate(1 + 1 + 1 + 4 + textBytes.size).order(ByteOrder.LITTLE_ENDIAN)
                     buffer.put(CMD_SEND_CHANNEL_TXT_MSG)
-                    buffer.put(0x00)
+                    buffer.put(0x00) // txt_type = 0 (plain text)
                     buffer.put(channel.index.toByte())
                     buffer.putInt(txEpochSec)
                     buffer.put(textBytes)
@@ -1128,15 +1130,24 @@ class MeshCoreBleManager(private val context: Context) {
             }
         } else -1
 
-        // Only confirm the message matching the ACK hash; never fall back to an unrelated pending message.
-        if (exactMatchIdx < 0) return
-        val confirmedMsgId = currentList[exactMatchIdx].id
+        // Fallback to oldest in-flight SENDING direct message if hash does not match (since Firmware computes
+        // ACK hash with its own 32-byte sender PubKey in composeMsgPacket, which is not in the 6-byte recipient prefix).
+        val targetIdx = if (exactMatchIdx >= 0) {
+            exactMatchIdx
+        } else {
+            currentList.indexOfFirst { msg ->
+                msg.isFromMe && msg.deliveryStatus == DeliveryStatus.SENDING
+            }
+        }
+
+        if (targetIdx < 0) return
+        val confirmedMsgId = currentList[targetIdx].id
         clearDirectAckCandidates(confirmedMsgId)
         activeSendJobs.remove(confirmedMsgId)?.cancel()
 
         updateMessages { list ->
             list.mapIndexed { idx, msg ->
-                if (idx == exactMatchIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
+                if (idx == targetIdx) msg.copy(deliveryStatus = DeliveryStatus.DELIVERED) else msg
             }
         }
     }
@@ -1204,11 +1215,16 @@ class MeshCoreBleManager(private val context: Context) {
             if (!started) {
                 isWriting = false
                 awaitingCommandAck = false
+                commandQueue.addFirst(next)
+                scope.launch {
+                    delay(200L)
+                    processNextCommand()
+                }
                 return
             }
             ackTimeoutJob?.cancel()
             ackTimeoutJob = scope.launch {
-                delay(600L)
+                delay(1200L)
                 if (awaitingCommandAck) {
                     awaitingCommandAck = false
                     isWriting = false
@@ -1282,11 +1298,10 @@ class MeshCoreBleManager(private val context: Context) {
     private fun handleIncomingFrame(frame: ByteArray) {
         if (frame.isEmpty()) return
         val opcode = frame[0]
+        // Only release command lock on synchronous command replies (0x00, 0x01, 0x05, 0x06, 0x12),
+        // NEVER on async push notifications (0x80..0x89), so in-flight GATT writes are never collided/dropped!
         if (opcode == 0x00.toByte() || opcode == 0x01.toByte() || opcode == 0x05.toByte() ||
-            opcode == 0x06.toByte() || opcode == 0x08.toByte() || opcode == 0x09.toByte() ||
-            opcode == 0x0B.toByte() || opcode == 0x12.toByte() || opcode == 0x80.toByte() ||
-            opcode == 0x82.toByte() || opcode == 0x83.toByte() || opcode == 0x84.toByte() ||
-            opcode == 0x88.toByte() || opcode == 0x89.toByte()
+            opcode == 0x06.toByte() || opcode == 0x12.toByte()
         ) {
             releaseCommandLockAndContinue()
         }
