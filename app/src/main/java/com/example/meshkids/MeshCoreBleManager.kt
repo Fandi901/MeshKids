@@ -91,7 +91,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "2.0"
+        const val APP_VERSION: String = "2.2"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -100,49 +100,87 @@ class MeshCoreBleManager(private val context: Context) {
             "Kannst du mich abholen?"
         )
         val KNOWN_SCOPES: List<String> = listOf(
-            "de",
-            "de-nw",
-            "de-by",
-            "de-bw",
-            "de-ni",
-            "de-he",
-            "de-sn",
-            "de-rp",
-            "de-sl",
-            "de-bb",
-            "de-mv",
-            "de-sh",
-            "de-hh",
-            "de-hb",
-            "de-st",
-            "de-th",
-            "nrw",
+            "ruhrgebiet",
             "ruhr",
+            "pott",
+            "nrw",
+            "de-nw",
             "essen",
             "bochum",
             "dortmund",
             "duisburg",
+            "gelsenkirchen",
+            "oberhausen",
+            "bottrop",
+            "recklinghausen",
+            "mulheim",
+            "muelheim",
+            "herne",
+            "hagen",
+            "unna",
+            "en-kreis",
+            "rheinland",
+            "niederrhein",
+            "muensterland",
+            "sauerland",
+            "bergischesland",
             "koeln",
             "duesseldorf",
-            "muenster",
-            "aachen",
             "bonn",
-            "wuppertal",
-            "bayern",
-            "muenchen",
-            "berlin",
-            "hamburg",
-            "frankfurt",
-            "stuttgart",
-            "eu",
+            "aachen",
+            "bielefeld",
+            "muenster",
+            "de",
+            "deutschland",
             "dach",
             "at",
+            "oesterreich",
             "ch",
+            "schweiz",
+            "eu",
+            "europa",
+            "norddeutschland",
+            "sueddeutschland",
+            "ostdeutschland",
+            "westdeutschland",
+            "de-by",
+            "bayern",
+            "muenchen",
+            "de-bw",
+            "stuttgart",
+            "de-ni",
+            "hannover",
+            "de-he",
+            "frankfurt",
+            "de-sn",
+            "leipzig",
+            "dresden",
+            "de-rp",
+            "de-sl",
+            "de-bb",
+            "berlin",
+            "de-mv",
+            "de-sh",
+            "de-hh",
+            "hamburg",
+            "de-hb",
+            "bremen",
+            "de-st",
+            "de-th",
+            "nuernberg",
             "nl",
             "be",
+            "familie",
+            "zuhause",
+            "radeln",
+            "wandern",
+            "notfunk",
+            "mesh",
+            "lora",
             "local",
             "region",
-            "world"
+            "world",
+            "test"
         )
 
         val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -479,7 +517,28 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        return sb.toString().replace(Regex("\\s+"), " ").trim()
+        val cleanedBasic = sb.toString().replace(Regex("\\s+"), " ").trim()
+        val hasLeadingHash = cleanedBasic.startsWith("#")
+        val withoutLeadingHash = cleanedBasic.removePrefix("#").trim()
+
+        // Cut at any marker or symbol sequence that starts trailing garbage (like ")E%B[_~^}" or "schis..." or "=j!qq")
+        val markerCut = withoutLeadingHash
+            .replace(Regex("\\)[A-Za-z0-9%\\[_~^}\\!\\?\\=\\+\\/\\$\\*\\@\\#].*$"), "")
+            .substringBefore("schis")
+            .substringBefore("yLn")
+            .trim()
+
+        val allowedOnly = markerCut
+            .replace(Regex("(?i)(?:n?schis|yLn)[a-zA-Z0-9=+!?/\\)_\\[\\]~^}\$-]*$"), "")
+            .filter { ch ->
+                ch.isLetterOrDigit() || ch == '-' || ch == '_' || ch == ' '
+            }
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(24)
+
+        if (allowedOnly.isEmpty()) return ""
+        return if (hasLeadingHash) "#$allowedOnly" else allowedOnly
     }
 
     private fun loadPersistedUnreadTargetIds(): Set<String> {
@@ -1476,7 +1535,10 @@ class MeshCoreBleManager(private val context: Context) {
                 if (frame.size >= 34) {
                     val idx = frame[1].toInt() and 0xFF
                     if (idx in 0..7) {
-                        val decodedName = sanitizeChannelName(decodeCleanUtf8(frame.copyOfRange(2, 34)))
+                        val nameSlice = frame.copyOfRange(2, 34)
+                        val zeroIdx = nameSlice.indexOf(0.toByte()).let { if (it >= 0) it else nameSlice.size }
+                        val rawNameUtf8 = String(nameSlice, 0, zeroIdx, Charsets.UTF_8)
+                        val decodedName = sanitizeChannelName(rawNameUtf8)
                         val hasPsk = if (frame.size >= 50) {
                             frame.copyOfRange(34, 50).any { it.toInt() != 0 }
                         } else {
