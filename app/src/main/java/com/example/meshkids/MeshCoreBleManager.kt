@@ -91,7 +91,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "1.6"
+        const val APP_VERSION: String = "1.7"
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
@@ -551,31 +551,120 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    fun startScan() {
-        val scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
+    val appContext: Context
+        get() = context.applicationContext
+
+    fun startScan(): Boolean {
+        val adapter = bluetoothAdapter
+        if (adapter == null) {
+            _connectionState.value = "Kein Bluetooth-Adapter gefunden"
+            return false
+        }
+        if (!adapter.isEnabled) {
+            _connectionState.value = "Bitte Bluetooth einschalten"
+            return false
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val hasScan = androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.BLUETOOTH_SCAN
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!hasScan) {
+                _connectionState.value = "Berechtigung 'Geraete in der Naehe' fehlt"
+                return false
+            }
+        }
+        val scanner = adapter.bluetoothLeScanner
+        if (scanner == null) {
+            _connectionState.value = "BLE-Scanner nicht verfuegbar"
+            return false
+        }
+
         _discoveredDevices.value = emptyList()
-        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
-        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-        scanner.startScan(listOf(filter), settings, scanCallback)
+        stopScanQuietly(scanner)
+
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                    setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                }
+            }
+            .build()
+
+        // Use ScanFilter with SERVICE_UUID when supported, plus fallback scan without filter if startScan throws
+        val uuidFilter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+        try {
+            scanner.startScan(listOf(uuidFilter), settings, scanCallback)
+        } catch (_: SecurityException) {
+            _connectionState.value = "BLE-Scan durch Berechtigung blockiert"
+            return false
+        } catch (_: Exception) {
+            try {
+                scanner.startScan(emptyList(), settings, scanCallback)
+            } catch (_: Exception) {
+                _connectionState.value = "BLE-Scan konnte nicht gestartet werden"
+                return false
+            }
+        }
+
         scope.launch {
             delay(8000)
             stopScan()
+        }
+        return true
+    }
+
+    private fun stopScanQuietly(scanner: android.bluetooth.le.BluetoothLeScanner?) {
+        try {
+            scanner?.stopScan(scanCallback)
+        } catch (_: Exception) {
         }
     }
 
     fun stopScan() {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val hasScan = androidx.core.content.ContextCompat.checkSelfPermission(
+                    context,
+                    android.Manifest.permission.BLUETOOTH_SCAN
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!hasScan) return
+            }
             bluetoothAdapter?.bluetoothLeScanner?.stopScan(scanCallback)
         } catch (_: Exception) {
         }
     }
 
+    private fun matchesMeshCoreAdvert(result: ScanResult): Boolean {
+        val uuids = result.scanRecord?.serviceUuids
+        if (uuids != null && uuids.any { it.uuid == SERVICE_UUID }) return true
+        val devName = try { result.device?.name } catch (_: SecurityException) { null }
+            ?: result.scanRecord?.deviceName
+        if (!devName.isNullOrBlank() && (devName.contains("MeshCore", ignoreCase = true) || devName.contains("Wio", ignoreCase = true))) {
+            return true
+        }
+        return uuids == null
+    }
+
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = result.device
+            if (!matchesMeshCoreAdvert(result)) return
+            val device = result.device ?: return
             if (_discoveredDevices.value.none { it.address == device.address }) {
                 _discoveredDevices.value = _discoveredDevices.value + device
             }
+        }
+
+        override fun onBatchScanResults(results: MutableList<ScanResult>) {
+            for (r in results) {
+                onScanResult(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, r)
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            _connectionState.value = "BLE-Scan Fehler ($errorCode)"
         }
     }
 

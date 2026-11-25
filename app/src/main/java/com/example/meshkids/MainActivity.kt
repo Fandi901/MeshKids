@@ -69,11 +69,30 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var permissionsGranted by remember { mutableStateOf(false) }
 
+    fun checkBlePermissionsGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                bleManager.appContext,
+                Manifest.permission.BLUETOOTH_SCAN
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED &&
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    bleManager.appContext,
+                    Manifest.permission.BLUETOOTH_CONNECT
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                bleManager.appContext,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { granted ->
-        permissionsGranted = granted.values.all { it }
-        if (permissionsGranted) {
+    ) { _ ->
+        val allOk = checkBlePermissionsGranted()
+        permissionsGranted = allOk
+        if (allOk) {
             bleManager.autoConnectIfSaved()
         }
     }
@@ -84,7 +103,12 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
         } else {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-        permissionLauncher.launch(perms)
+        if (checkBlePermissionsGranted()) {
+            permissionsGranted = true
+            bleManager.autoConnectIfSaved()
+        } else {
+            permissionLauncher.launch(perms)
+        }
     }
 
     DisposableEffect(lifecycleOwner, permissionsGranted) {
@@ -604,7 +628,24 @@ fun ParentSettingsScreen(
                 Text("1. MeshCore Funkgeraet koppeln ($connectionState)", fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { bleManager.startScan() }) {
+                    Button(onClick = {
+                        if (!checkBlePermissionsGranted()) {
+                            val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+                            } else {
+                                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                            }
+                            infoBanner = "Bitte Bluetooth-Berechtigungen erteilen..."
+                            permissionLauncher.launch(perms)
+                        } else {
+                            val started = bleManager.startScan()
+                            infoBanner = if (started) {
+                                "BLE-Suche laeuft (8 Sek.)..."
+                            } else {
+                                bleManager.connectionState.value
+                            }
+                        }
+                    }) {
                         Text("BLE suchen")
                     }
                     OutlinedButton(onClick = {
