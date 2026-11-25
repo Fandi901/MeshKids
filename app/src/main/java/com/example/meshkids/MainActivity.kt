@@ -130,6 +130,7 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     val allChannels by bleManager.channels.collectAsState()
     val unreadTargetIds by bleManager.unreadTargetIds.collectAsState()
     val alertCounter by bleManager.incomingAlertCounter.collectAsState()
+    val messages by bleManager.messages.collectAsState()
 
     val allowedTargets = remember(allContacts, allChannels, messages, unreadTargetIds) {
         val channelTargets = allChannels.filter { it.isAllowedForKid }.map {
@@ -161,7 +162,6 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
         )
     }
 
-    val messages by bleManager.messages.collectAsState()
     val quickReplies by bleManager.quickReplies.collectAsState()
 
     var selectedTargetId by remember { mutableStateOf<String?>(null) }
