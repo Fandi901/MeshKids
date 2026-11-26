@@ -469,7 +469,7 @@ fun KidTargetListScreen(
     }
 }
 
-private val LINK_REGEX = Regex("""(https?://\S+|www\.\S+)""", RegexOption.IGNORE_CASE)
+private val LINK_REGEX = Regex("(https?://\\S+|www\\.\\S+)", RegexOption.IGNORE_CASE)
 
 private fun buildLinkAnnotatedText(text: String, baseColor: Color, linkColor: Color): AnnotatedString {
     return buildAnnotatedString {

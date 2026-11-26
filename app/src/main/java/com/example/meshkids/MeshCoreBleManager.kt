@@ -245,8 +245,8 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    private val _manualGroupAliases = MutableStateFlow>(loadManualGroupAliases())
-    val manualGroupAliases: StateFlow> = _manualGroupAliases
+    private val _manualGroupAliases = MutableStateFlow<Map<String, String>>(loadManualGroupAliases())
+    val manualGroupAliases: StateFlow<Map<String, String>> = _manualGroupAliases
 
     private val _channels = MutableStateFlow<List<MeshChannel>>(loadCachedDeviceChannels())
     val channels: StateFlow<List<MeshChannel>> = _channels
@@ -548,21 +548,21 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        val cleanedBasic = sb.toString().replace(Regex("""\s+"""), " ").trim()
+        val cleanedBasic = sb.toString().replace(Regex("\\s+"), " ").trim()
         val hasLeadingHash = cleanedBasic.startsWith("#")
         val withoutLeadingHash = cleanedBasic.removePrefix("#").trim()
 
         val markerCut = withoutLeadingHash
-            .replace(Regex("""\)[A-Za-z0-9%\[_~^}!?=+/*$*@#].*$"""), "")
-            .replace(Regex("""yLn=[a-zA-Z0-9=+!?/\)_\[\]~^}\$-]*$"""), "")
-            .replace(Regex("""[)=!?%\[_~^}+/*$*@#].*$"""), "")
+            .replace(Regex("\\)[A-Za-z0-9%\\[_~^}!?=+/*$*@#].*$"), "")
+            .replace(Regex("yLn=[a-zA-Z0-9=+!?/\\)_\\[\\]~^}\\$-]*$"), "")
+            .replace(Regex("[)=!?%\\[_~^}+/*$*@#].*$"), "")
             .trim()
 
         val allowedOnly = markerCut
             .filter { ch ->
                 ch.isLetterOrDigit() || ch == '-' || ch == '_' || ch == ' '
             }
-            .replace(Regex("""\s+"""), " ")
+            .replace(Regex("\\s+"), " ")
             .trim()
             .take(24)
 
@@ -570,8 +570,8 @@ class MeshCoreBleManager(private val context: Context) {
         return if (hasLeadingHash) "#$allowedOnly" else allowedOnly
     }
 
-    private val _lastReadTimestamps = MutableStateFlow>(loadLastReadTimestamps())
-    val lastReadTimestamps: StateFlow> = _lastReadTimestamps
+    private val _lastReadTimestamps = MutableStateFlow<Map<String, Long>>(loadLastReadTimestamps())
+    val lastReadTimestamps: StateFlow<Map<String, Long>> = _lastReadTimestamps
 
     private fun loadLastReadTimestamps(): Map<String, Long> {
         val raw = prefs.getString("last_read_timestamps_json", null) ?: return emptyMap()
@@ -678,7 +678,7 @@ class MeshCoreBleManager(private val context: Context) {
     private fun normalizeHostInput(rawInput: String): String {
         val trimmed = rawInput.trim()
         if (trimmed.isEmpty()) return ""
-        val withoutScheme = trimmed.replace(Regex("""^[a-zA-Z][a-zA-Z0-9+.-]*://"""), "")
+        val withoutScheme = trimmed.replace(Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://"), "")
         val hostPart = withoutScheme.substringBefore("/").substringBefore("?").substringBefore("#").trim()
         if (hostPart.startsWith("[") && hostPart.contains("]")) {
             return hostPart.substringAfter("[").substringBefore("]").trim()
@@ -1894,3 +1894,5 @@ class MeshCoreBleManager(private val context: Context) {
         _channels.value = _channels.value.map {
             if (it.index == channelIndex) it.copy(isAllowedForKid = allowed) else it
         }
+    }
+}
