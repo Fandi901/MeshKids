@@ -16,10 +16,10 @@ import android.media.RingtoneManager
 import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.*
-import org.json.JSONArray
-import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -40,7 +40,7 @@ data class MeshContact(
     val originalName: String,
     val aliasName: String,
     val isAllowedForKid: Boolean = false,
-    val nodeType: Int = 1 // 1 = Chat/Kontakt, 2 = Repeater, 3 = Room Server
+    val nodeType: Int = 1
 ) {
     val displayName: String
         get() = aliasName.trim().ifBlank { originalName.trim() }
@@ -103,87 +103,21 @@ class MeshCoreBleManager(private val context: Context) {
             "Kannst du mich abholen?"
         )
         val KNOWN_SCOPES: List<String> = listOf(
-            "ruhrgebiet",
-            "ruhr",
-            "pott",
-            "nrw",
-            "de-nw",
-            "essen",
-            "bochum",
-            "dortmund",
-            "duisburg",
-            "gelsenkirchen",
-            "oberhausen",
-            "bottrop",
-            "recklinghausen",
-            "mulheim",
-            "muelheim",
-            "herne",
-            "hagen",
-            "unna",
-            "en-kreis",
-            "rheinland",
-            "niederrhein",
-            "muensterland",
-            "sauerland",
-            "bergischesland",
-            "koeln",
-            "duesseldorf",
-            "bonn",
-            "aachen",
-            "bielefeld",
-            "muenster",
-            "de",
-            "deutschland",
-            "dach",
-            "at",
-            "oesterreich",
-            "ch",
-            "schweiz",
-            "eu",
-            "europa",
-            "norddeutschland",
-            "sueddeutschland",
-            "ostdeutschland",
-            "westdeutschland",
-            "de-by",
-            "bayern",
-            "muenchen",
-            "de-bw",
-            "stuttgart",
-            "de-ni",
-            "hannover",
-            "de-he",
-            "frankfurt",
-            "de-sn",
-            "leipzig",
-            "dresden",
-            "de-rp",
-            "de-sl",
-            "de-bb",
-            "berlin",
-            "de-mv",
-            "de-sh",
-            "de-hh",
-            "hamburg",
-            "de-hb",
-            "bremen",
-            "de-st",
-            "de-th",
-            "nuernberg",
-            "nl",
-            "be",
-            "familie",
-            "zuhause",
-            "radeln",
-            "wandern",
-            "notfunk",
-            "mesh",
-            "lora",
-            "local",
-            "region",
-            "world",
-            "test"
+            "ruhrgebiet", "ruhr", "pott", "nrw", "de-nw",
+            "essen", "bochum", "dortmund", "duisburg", "gelsenkirchen",
+            "oberhausen", "bottrop", "recklinghausen", "mulheim", "muelheim",
+            "herne", "hagen", "unna", "en-kreis", "rheinland",
+            "niederrhein", "muensterland", "sauerland", "bergischesland",
+            "koeln", "duesseldorf", "bonn", "aachen", "bielefeld", "muenster",
+            "de", "deutschland", "dach", "at", "oesterreich", "ch", "schweiz",
+            "eu", "europa", "norddeutschland", "sueddeutschland",
+            "ostdeutschland", "westdeutschland", "de-by", "bayern", "muenchen",
+            "de-bw", "stuttgart", "de-ni", "hannover", "de-he", "frankfurt",
+            "de-sn", "leipzig", "dresden", "de-rp", "de-sl", "de-bb", "berlin",
+            "de-mv", "de-sh", "de-hh", "hamburg", "de-hb", "bremen",
+            "de-st", "de-th", "nuernberg", "nl", "be", "familie", "zuhause",
+            "radeln", "wandern", "notfunk", "mesh", "lora", "local",
+            "region", "world", "test"
         )
 
         val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -457,7 +391,7 @@ class MeshCoreBleManager(private val context: Context) {
                 val status = try {
                     DeliveryStatus.valueOf(statusName)
                 } catch (_: Exception) {
-                    if (isFromMe) DeliveryStatus.DELIVERED else DeliveryStatus.DELIVERED
+                    DeliveryStatus.DELIVERED
                 }
                 val normalizedStatus = when (status) {
                     DeliveryStatus.SENDING -> DeliveryStatus.FAILED
@@ -520,7 +454,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private fun sanitizeChannelName(input: String): String {
-        val beforeNull = input.substringBefore(' ')
+        val beforeNull = input.substringBefore('\u0000')
         val sb = StringBuilder(beforeNull.length)
         var i = 0
         while (i < beforeNull.length) {
@@ -543,12 +477,12 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        val cleanedBasic = sb.toString().replace(Regex("\s+"), " ").trim()
+        val cleanedBasic = sb.toString().replace(Regex("\\s+"), " ").trim()
         val hasLeadingHash = cleanedBasic.startsWith("#")
         val withoutLeadingHash = cleanedBasic.removePrefix("#").trim()
 
         val markerCut = withoutLeadingHash
-            .replace(Regex("\)[A-Za-z0-9%\[_~^}\!\?\=\+\/\$\*\@\#].*$"), "")
+            .replace(Regex("\\)[A-Za-z0-9%\[_~^}\!\?\=\+\/\$\*\@\#].*$"), "")
             .replace(Regex("yLn=[a-zA-Z0-9=+!?/\)_\[\]~^}\$-]*$"), "")
             .replace(Regex("[)=!?%\[_~^}\+\/\$\*\@\#].*$"), "")
             .trim()
@@ -557,7 +491,7 @@ class MeshCoreBleManager(private val context: Context) {
             .filter { ch ->
                 ch.isLetterOrDigit() || ch == '-' || ch == '_' || ch == ' '
             }
-            .replace(Regex("\s+"), " ")
+            .replace(Regex("\\s+"), " ")
             .trim()
             .take(24)
 
@@ -1876,7 +1810,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private fun decodeCleanUtf8(bytes: ByteArray): String {
-        val raw = String(bytes, Charsets.UTF_8).trimEnd(' ')
+        val raw = String(bytes, Charsets.UTF_8).trimEnd('\u0000')
         return sanitizeText(raw)
     }
 
@@ -1894,8 +1828,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        return sb.toString().replace('', ' ').replace('
-', ' ').trim()
+        return sb.toString().replace("\r", " ").replace("\n", " ").trim()
     }
 
     private fun addIncomingContactMessageIfAllowed(prefixHex: String, text: String, msgTimestampMs: Long = System.currentTimeMillis()) {
