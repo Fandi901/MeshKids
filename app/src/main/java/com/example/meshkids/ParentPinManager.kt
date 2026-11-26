@@ -1,30 +1,24 @@
 package com.example.meshkids
 
 import android.content.Context
-import java.security.MessageDigest
 
 class ParentPinManager(context: Context) {
-    private val prefs = context.getSharedPreferences("meshkids_security", Context.MODE_PRIVATE)
+    private val prefs = context.getSharedPreferences("meshkids_pin_prefs", Context.MODE_PRIVATE)
 
-    init {
-        if (!prefs.contains("pin_hash")) {
-            setPin("1234")
-        }
+    companion object {
+        private const val KEY_PIN = "parent_pin"
+        private const val DEFAULT_PIN = "1234"
     }
 
-    fun verifyPin(inputPin: String): Boolean {
-        val savedHash = prefs.getString("pin_hash", null) ?: return false
-        return hashPin(inputPin) == savedHash
+    fun verifyPin(entered: String): Boolean {
+        val saved = prefs.getString(KEY_PIN, DEFAULT_PIN) ?: DEFAULT_PIN
+        return entered.trim() == saved
     }
 
     fun setPin(newPin: String) {
-        if (newPin.length >= 4) {
-            prefs.edit().putString("pin_hash", hashPin(newPin)).apply()
+        val cleaned = newPin.trim()
+        if (cleaned.length >= 4) {
+            prefs.edit().putString(KEY_PIN, cleaned).apply()
         }
-    }
-
-    private fun hashPin(pin: String): String {
-        val bytes = MessageDigest.getInstance("SHA-256").digest(pin.toByteArray())
-        return bytes.joinToString("") { "%02x".format(it) }
     }
 }
