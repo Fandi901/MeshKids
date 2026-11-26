@@ -249,60 +249,52 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                         unreadTargetIds.any { it != selectedTarget?.id }
                     }
                     if (hasOtherUnread) {
-                        val infiniteTransition = rememberInfiniteTransition(label = "otherChatBeacon")
-                        val sweepAngle by infiniteTransition.animateFloat(
-                            initialValue = 0f,
-                            targetValue = 360f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(durationMillis = 1200, easing = LinearEasing),
-                                repeatMode = RepeatMode.Restart
-                            ),
-                            label = "beaconAngle"
-                        )
-                        val pulseAlpha by infiniteTransition.animateFloat(
-                            initialValue = 0.45f,
-                            targetValue = 1f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(durationMillis = 550, easing = LinearEasing),
-                                repeatMode = RepeatMode.Reverse
-                            ),
-                            label = "beaconPulse"
-                        )
+                        var beaconAngle by remember { mutableFloatStateOf(0f) }
+                        LaunchedEffect(hasOtherUnread) {
+                            while (true) {
+                                beaconAngle = (beaconAngle + 15f) % 360f
+                                delay(40L)
+                            }
+                        }
                         Box(
                             modifier = Modifier
-                                .padding(end = 2.dp)
-                                .size(24.dp)
+                                .padding(end = 4.dp)
+                                .size(28.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFFFD54F).copy(alpha = 0.22f * pulseAlpha))
                                 .clickable { selectedTargetId = null },
                             contentAlignment = Alignment.Center
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(18.dp)
-                                    .rotate(sweepAngle)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(5.dp)
-                                        .align(Alignment.TopCenter)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFFFFEB3B))
+                            androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+                                val center = this.center
+                                val outerRadius = size.minDimension / 2f
+                                drawCircle(
+                                    color = Color(0xFFFF5252).copy(alpha = 0.25f),
+                                    radius = outerRadius,
+                                    center = center
                                 )
-                                Box(
-                                    modifier = Modifier
-                                        .size(4.dp)
-                                        .align(Alignment.BottomCenter)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFFFF7043).copy(alpha = 0.85f))
+                                drawArc(
+                                    color = Color(0xFFFFEB3B).copy(alpha = 0.92f),
+                                    startAngle = beaconAngle - 35f,
+                                    sweepAngle = 70f,
+                                    useCenter = true
+                                )
+                                drawArc(
+                                    color = Color(0xFFFF7043).copy(alpha = 0.78f),
+                                    startAngle = (beaconAngle + 180f) - 30f,
+                                    sweepAngle = 60f,
+                                    useCenter = true
+                                )
+                                drawCircle(
+                                    color = Color(0xFFD50000),
+                                    radius = outerRadius * 0.34f,
+                                    center = center
+                                )
+                                drawCircle(
+                                    color = Color.White,
+                                    radius = outerRadius * 0.14f,
+                                    center = center
                                 )
                             }
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFFFF5252))
-                            )
                         }
                     }
                     IconButton(onClick = { showPinDialog = true }) {
@@ -536,12 +528,14 @@ fun KidChatScreen(
 
     if (replyTargetMsg != null) {
         val targetMessage = replyTargetMsg!!
-        val recipientChannelName = targetMessage.rawSenderName?.trim().orEmpty()
-            .ifBlank { targetMessage.senderName?.trim().orEmpty() }
+        val displayAliasName = targetMessage.senderName?.trim().orEmpty()
+            .ifBlank { targetMessage.rawSenderName?.trim().orEmpty() }
             .ifBlank { "Sender" }
+        val meshCoreNodeName = targetMessage.rawSenderName?.trim().orEmpty()
+            .ifBlank { displayAliasName }
         AlertDialog(
             onDismissRequest = { replyTargetMsg = null },
-            title = { Text("Antwort an $recipientChannelName") },
+            title = { Text("Antwort an $displayAliasName") },
             text = {
                 Column {
                     Text(
@@ -555,7 +549,7 @@ fun KidChatScreen(
                         value = replyDraftText,
                         onValueChange = { if (it.length <= 133) replyDraftText = it },
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("$recipientChannelName: ...") },
+                        placeholder = { Text("$displayAliasName: ...") },
                         singleLine = true
                     )
                 }
@@ -564,16 +558,28 @@ fun KidChatScreen(
                 Button(
                     enabled = isConnected && replyDraftText.isNotBlank(),
                     onClick = {
-                        val prefix = "$recipientChannelName: "
-                        val trimmedBody = replyDraftText.trim()
-                        val fullMsg = if (trimmedBody.startsWith(prefix, ignoreCase = true)) {
-                            trimmedBody
-                        } else {
-                            "$prefix$trimmedBody"
-                        }.take(133)
-                        onSendMessage(fullMsg)
-                        replyTargetMsg = null
-                        replyDraftText = ""
+                        var body = replyDraftText.trim()
+                        val aliasColonPrefix = "$displayAliasName:"
+                        val rawColonPrefix = "$meshCoreNodeName:"
+                        val atRawPrefix = "@$meshCoreNodeName"
+                        val atAliasPrefix = "@$displayAliasName"
+                        body = when {
+                            body.startsWith(atRawPrefix, ignoreCase = true) ->
+                                body.substring(atRawPrefix.length).trimStart(':', ' ')
+                            body.startsWith(atAliasPrefix, ignoreCase = true) ->
+                                body.substring(atAliasPrefix.length).trimStart(':', ' ')
+                            body.startsWith(aliasColonPrefix, ignoreCase = true) ->
+                                body.substring(aliasColonPrefix.length).trimStart()
+                            body.startsWith(rawColonPrefix, ignoreCase = true) ->
+                                body.substring(rawColonPrefix.length).trimStart()
+                            else -> body
+                        }
+                        if (body.isNotBlank()) {
+                            val fullMsg = "@$meshCoreNodeName $body".take(133)
+                            onSendMessage(fullMsg)
+                            replyTargetMsg = null
+                            replyDraftText = ""
+                        }
                     }
                 ) {
                     Text("Senden")
@@ -672,11 +678,11 @@ fun KidChatScreen(
                                     },
                                     onLongPress = {
                                         if (canReplyInGroup) {
-                                            val recipientChannelName = msg.rawSenderName?.trim().orEmpty()
-                                                .ifBlank { msg.senderName?.trim().orEmpty() }
+                                            val displayAliasName = msg.senderName?.trim().orEmpty()
+                                                .ifBlank { msg.rawSenderName?.trim().orEmpty() }
                                                 .ifBlank { "Sender" }
                                             replyTargetMsg = msg
-                                            replyDraftText = "$recipientChannelName: "
+                                            replyDraftText = "$displayAliasName: "
                                         }
                                     }
                                 )
