@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -197,6 +198,14 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     var showPinDialog by remember { mutableStateOf(false) }
     var showParentSettings by remember { mutableStateOf(false) }
 
+    BackHandler(enabled = showParentSettings || showPinDialog || selectedTargetId != null) {
+        when {
+            showParentSettings -> showParentSettings = false
+            showPinDialog -> showPinDialog = false
+            selectedTargetId != null -> selectedTargetId = null
+        }
+    }
+
     if (showPinDialog) {
         ParentPinDialog(
             pinManager = pinManager,
@@ -322,9 +331,15 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                     }
                 )
             } else {
+                val orderedTargetMessages = remember(messages, selectedTarget.id) {
+                    messages
+                        .filter { it.targetId == selectedTarget.id }
+                        .sortedByDescending { it.timestamp }
+                        .take(20)
+                }
                 KidChatScreen(
                     target = selectedTarget,
-                    messages = messages.filter { it.targetId == selectedTarget.id }.takeLast(20),
+                    messages = orderedTargetMessages,
                     quickReplies = quickReplies,
                     isConnected = isConnected,
                     onSendMessage = { text -> bleManager.sendMessage(selectedTarget, text) }
@@ -614,7 +629,15 @@ fun KidChatScreen(
                 )
             }
         }
+        val chatListState = androidx.compose.foundation.lazy.rememberLazyListState()
+        val topMessageKey = messages.firstOrNull()?.id
+        LaunchedEffect(target.id, topMessageKey) {
+            if (messages.isNotEmpty()) {
+                chatListState.scrollToItem(0)
+            }
+        }
         LazyColumn(
+            state = chatListState,
             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
@@ -1346,7 +1369,7 @@ fun ParentSettingsScreen(
                                         placeholder = { Text("Alias (z. B. Familie) – wird beim Verlassen gespeichert") },
                                         singleLine = true
                                     )
-                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
                                     var scopeFocused by remember(channel.index) { mutableStateOf(false) }
                                     var scopeMenuExpanded by remember(channel.index) { mutableStateOf(false) }
                                     val filteredScopes = remember(scopeField) {
@@ -1364,53 +1387,92 @@ fun ParentSettingsScreen(
                                         }
                                     }
 
-                                    ExposedDropdownMenuBox(
-                                        expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
-                                        onExpandedChange = { expanded ->
-                                            scopeMenuExpanded = expanded && filteredScopes.isNotEmpty()
-                                        }
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = Color(0xFFFFF8E1),
+                                        border = BorderStroke(1.5.dp, Color(0xFFF57C00))
                                     ) {
-                                        OutlinedTextField(
-                                            value = scopeField,
-                                            onValueChange = { raw ->
-                                                if (raw.length <= 32) {
-                                                    scopeField = raw
-                                                    scopeMenuExpanded = filteredScopes.isNotEmpty()
+                                        Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Surface(
+                                                    color = Color(0xFFEF6C00),
+                                                    shape = RoundedCornerShape(6.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "SCOPE",
+                                                        color = Color.White,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
                                                 }
-                                            },
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .menuAnchor()
-                                                .onFocusChanged { focusState ->
-                                                    val nowFocused = focusState.isFocused
-                                                    if (nowFocused && filteredScopes.isNotEmpty()) {
-                                                        scopeMenuExpanded = true
-                                                    } else if (scopeFocused && !nowFocused) {
-                                                        scopeMenuExpanded = false
-                                                        if (scopeField != channel.regionScope) {
-                                                            bleManager.setChannelRegionScope(channel.index, scopeField)
-                                                            infoBanner = "Scope für Kanal ${channel.index} gespeichert."
-                                                        }
-                                                    }
-                                                    scopeFocused = nowFocused
-                                                },
-                                            placeholder = { Text("Scope / Region (z. B. de-nw, nrw, oder frei eintippen)") },
-                                            singleLine = true
-                                        )
-                                        ExposedDropdownMenu(
-                                            expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
-                                            onDismissRequest = { scopeMenuExpanded = false }
-                                        ) {
-                                            filteredScopes.forEach { candidateScope ->
-                                                DropdownMenuItem(
-                                                    text = { Text(candidateScope) },
-                                                    onClick = {
-                                                        scopeField = candidateScope
-                                                        scopeMenuExpanded = false
-                                                        bleManager.setChannelRegionScope(channel.index, candidateScope)
-                                                        infoBanner = "Scope '$candidateScope' für Kanal ${channel.index} gespeichert."
-                                                    }
+                                                Text(
+                                                    text = "Region / Scope für Kanal ${channel.index}",
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFFE65100)
                                                 )
+                                            }
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            ExposedDropdownMenuBox(
+                                                expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                                                onExpandedChange = { expanded ->
+                                                    scopeMenuExpanded = expanded && filteredScopes.isNotEmpty()
+                                                }
+                                            ) {
+                                                OutlinedTextField(
+                                                    value = scopeField,
+                                                    onValueChange = { raw ->
+                                                        if (raw.length <= 32) {
+                                                            scopeField = raw
+                                                            scopeMenuExpanded = filteredScopes.isNotEmpty()
+                                                        }
+                                                    },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .menuAnchor()
+                                                        .onFocusChanged { focusState ->
+                                                            val nowFocused = focusState.isFocused
+                                                            if (nowFocused && filteredScopes.isNotEmpty()) {
+                                                                scopeMenuExpanded = true
+                                                            } else if (scopeFocused && !nowFocused) {
+                                                                scopeMenuExpanded = false
+                                                                if (scopeField != channel.regionScope) {
+                                                                    bleManager.setChannelRegionScope(channel.index, scopeField)
+                                                                    infoBanner = "Scope für Kanal ${channel.index} gespeichert."
+                                                                }
+                                                            }
+                                                            scopeFocused = nowFocused
+                                                        },
+                                                    colors = OutlinedTextFieldDefaults.colors(
+                                                        focusedContainerColor = Color.White,
+                                                        unfocusedContainerColor = Color.White,
+                                                        focusedBorderColor = Color(0xFFEF6C00),
+                                                        unfocusedBorderColor = Color(0xFFFF9800)
+                                                    ),
+                                                    placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, nrw)") },
+                                                    singleLine = true
+                                                )
+                                                ExposedDropdownMenu(
+                                                    expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                                                    onDismissRequest = { scopeMenuExpanded = false }
+                                                ) {
+                                                    filteredScopes.forEach { candidateScope ->
+                                                        DropdownMenuItem(
+                                                            text = { Text(candidateScope) },
+                                                            onClick = {
+                                                                scopeField = candidateScope
+                                                                scopeMenuExpanded = false
+                                                                bleManager.setChannelRegionScope(channel.index, candidateScope)
+                                                                infoBanner = "Scope '$candidateScope' für Kanal ${channel.index} gespeichert."
+                                                            }
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
