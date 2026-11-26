@@ -482,9 +482,9 @@ class MeshCoreBleManager(private val context: Context) {
         val withoutLeadingHash = cleanedBasic.removePrefix("#").trim()
 
         val markerCut = withoutLeadingHash
-            .replace(Regex("\\)[A-Za-z0-9%\[_~^}\!\?\=\+\/\$\*\@\#].*$"), "")
-            .replace(Regex("yLn=[a-zA-Z0-9=+!?/\)_\[\]~^}\$-]*$"), "")
-            .replace(Regex("[)=!?%\[_~^}\+\/\$\*\@\#].*$"), "")
+            .replace(Regex("""\)[A-Za-z0-9%\[_~^}!\?=\+/\$\*@#].*$"""), "")
+            .replace(Regex("""yLn=[a-zA-Z0-9=+!?/\)_\[\]~^}\$-]*$"""), "")
+            .replace(Regex("""[)=!?%\[_~^}\+/\$\*@#].*$"""), "")
             .trim()
 
         val allowedOnly = markerCut
