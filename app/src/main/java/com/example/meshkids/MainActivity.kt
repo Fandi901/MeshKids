@@ -26,15 +26,30 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -230,6 +245,66 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                     }
                 },
                 actions = {
+                    val hasOtherUnread = remember(unreadTargetIds, selectedTarget?.id) {
+                        unreadTargetIds.any { it != selectedTarget?.id }
+                    }
+                    if (hasOtherUnread) {
+                        val infiniteTransition = rememberInfiniteTransition(label = "otherChatBeacon")
+                        val sweepAngle by infiniteTransition.animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(durationMillis = 1200, easing = LinearEasing),
+                                repeatMode = RepeatMode.Restart
+                            ),
+                            label = "beaconAngle"
+                        )
+                        val pulseAlpha by infiniteTransition.animateFloat(
+                            initialValue = 0.45f,
+                            targetValue = 1f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(durationMillis = 550, easing = LinearEasing),
+                                repeatMode = RepeatMode.Reverse
+                            ),
+                            label = "beaconPulse"
+                        )
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 2.dp)
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFFFD54F).copy(alpha = 0.22f * pulseAlpha))
+                                .clickable { selectedTargetId = null },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .rotate(sweepAngle)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(5.dp)
+                                        .align(Alignment.TopCenter)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFFFEB3B))
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(4.dp)
+                                        .align(Alignment.BottomCenter)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFFF7043).copy(alpha = 0.85f))
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFFF5252))
+                            )
+                        }
+                    }
                     IconButton(onClick = { showPinDialog = true }) {
                         Icon(
                             imageVector = Icons.Default.Settings,
@@ -382,6 +457,36 @@ fun KidTargetListScreen(
     }
 }
 
+private val LINK_REGEX = Regex("(https?://[^\s]+|www\.[^\s]+)", RegexOption.IGNORE_CASE)
+
+private fun buildLinkAnnotatedText(text: String, baseColor: Color, linkColor: Color): AnnotatedString {
+    return buildAnnotatedString {
+        var lastIdx = 0
+        for (match in LINK_REGEX.findAll(text)) {
+            if (match.range.first > lastIdx) {
+                withStyle(SpanStyle(color = baseColor)) {
+                    append(text.substring(lastIdx, match.range.first))
+                }
+            }
+            withStyle(
+                SpanStyle(
+                    color = linkColor,
+                    textDecoration = TextDecoration.Underline,
+                    fontWeight = FontWeight.Medium
+                )
+            ) {
+                append(match.value)
+            }
+            lastIdx = match.range.last + 1
+        }
+        if (lastIdx < text.length) {
+            withStyle(SpanStyle(color = baseColor)) {
+                append(text.substring(lastIdx))
+            }
+        }
+    }
+}
+
 @Composable
 fun KidChatScreen(
     target: ChatTarget,
@@ -391,11 +496,96 @@ fun KidChatScreen(
     onSendMessage: (String) -> Unit
 ) {
     var inputText by remember { mutableStateOf("") }
+    val clipboardManager = LocalClipboardManager.current
+
+    var replyTargetMsg by remember { mutableStateOf<ChatMessage?>(null) }
+    var replyDraftText by remember { mutableStateOf("") }
+    var copiedLinkText by remember { mutableStateOf<String?>(null) }
 
     val blueGroupColor = Color(0xFF1E88E5)
     val greenDeliveredColor = Color(0xFF2E7D32)
     val redPendingOrFailedColor = Color(0xFFD32F2F)
     val channelScope = target.channel?.regionScope?.trim().orEmpty()
+
+    if (copiedLinkText != null) {
+        AlertDialog(
+            onDismissRequest = { copiedLinkText = null },
+            title = { Text("Link erkannt") },
+            text = {
+                Text(
+                    text = copiedLinkText!!,
+                    color = Color(0xFF0D47A1),
+                    textDecoration = TextDecoration.Underline
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    clipboardManager.setText(AnnotatedString(copiedLinkText!!))
+                    copiedLinkText = null
+                }) {
+                    Text("Link kopieren")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { copiedLinkText = null }) {
+                    Text("Schließen")
+                }
+            }
+        )
+    }
+
+    if (replyTargetMsg != null) {
+        val targetMessage = replyTargetMsg!!
+        val recipientChannelName = targetMessage.rawSenderName?.trim().orEmpty()
+            .ifBlank { targetMessage.senderName?.trim().orEmpty() }
+            .ifBlank { "Sender" }
+        AlertDialog(
+            onDismissRequest = { replyTargetMsg = null },
+            title = { Text("Antwort an $recipientChannelName") },
+            text = {
+                Column {
+                    Text(
+                        text = "Nachricht: ${targetMessage.text}",
+                        fontSize = 13.sp,
+                        color = Color.DarkGray,
+                        maxLines = 2
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = replyDraftText,
+                        onValueChange = { if (it.length <= 133) replyDraftText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("$recipientChannelName: ...") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = isConnected && replyDraftText.isNotBlank(),
+                    onClick = {
+                        val prefix = "$recipientChannelName: "
+                        val trimmedBody = replyDraftText.trim()
+                        val fullMsg = if (trimmedBody.startsWith(prefix, ignoreCase = true)) {
+                            trimmedBody
+                        } else {
+                            "$prefix$trimmedBody"
+                        }.take(133)
+                        onSendMessage(fullMsg)
+                        replyTargetMsg = null
+                        replyDraftText = ""
+                    }
+                ) {
+                    Text("Senden")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { replyTargetMsg = null }) {
+                    Text("Abbrechen")
+                }
+            }
+        )
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         if (target.type == ChatTargetType.CHANNEL) {
@@ -431,6 +621,10 @@ fun KidChatScreen(
                     else -> redPendingOrFailedColor
                 }
                 val textColor = if (msg.isFromMe) Color.White else Color.Black
+                val linkColor = if (msg.isFromMe) Color(0xFFFFF59D) else Color(0xFF1565C0)
+                val foundLink = remember(msg.text) { LINK_REGEX.find(msg.text)?.value }
+                val canReplyInGroup = !msg.isFromMe && target.type == ChatTargetType.CHANNEL
+
                 val statusLabel = when {
                     msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> "Vom Repeater gehört"
                     msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> "Sende / warte auf Repeater..."
@@ -464,13 +658,37 @@ fun KidChatScreen(
                         Surface(
                             shape = RoundedCornerShape(18.dp),
                             color = bubbleColor,
-                            shadowElevation = 2.dp
+                            shadowElevation = 2.dp,
+                            modifier = Modifier.pointerInput(msg.id, canReplyInGroup, foundLink) {
+                                detectTapGestures(
+                                    onTap = {
+                                        if (foundLink != null) {
+                                            copiedLinkText = foundLink
+                                        }
+                                    },
+                                    onPress = {
+                                        if (!canReplyInGroup) return@detectTapGestures
+                                        val triggered = tryAwaitRelease()
+                                        // Fallback if pressed ~2s; onLongPress handles ~500ms+, wait 2000ms for explicit 2s hold
+                                        if (!triggered) {
+                                        }
+                                    },
+                                    onLongPress = {
+                                        if (canReplyInGroup) {
+                                            val recipientChannelName = msg.rawSenderName?.trim().orEmpty()
+                                                .ifBlank { msg.senderName?.trim().orEmpty() }
+                                                .ifBlank { "Sender" }
+                                            replyTargetMsg = msg
+                                            replyDraftText = "$recipientChannelName: "
+                                        }
+                                    }
+                                )
+                            }
                         ) {
                             Text(
-                                text = msg.text,
+                                text = buildLinkAnnotatedText(msg.text, textColor, linkColor),
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                                fontSize = 18.sp,
-                                color = textColor
+                                fontSize = 18.sp
                             )
                         }
                         if (msg.isFromMe) {

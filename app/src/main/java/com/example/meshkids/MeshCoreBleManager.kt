@@ -75,6 +75,7 @@ data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val targetId: String,
     val senderName: String? = null,
+    val rawSenderName: String? = null,
     val text: String,
     val isFromMe: Boolean,
     val deliveryStatus: DeliveryStatus = DeliveryStatus.SENDING,
@@ -92,7 +93,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "2.6"
+        const val APP_VERSION: String = "2.7"
         const val MAX_CHANNELS: Int = 32
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
@@ -408,6 +409,7 @@ class MeshCoreBleManager(private val context: Context) {
                     put("id", msg.id)
                     put("targetId", msg.targetId)
                     put("senderName", msg.senderName ?: JSONObject.NULL)
+                    put("rawSenderName", msg.rawSenderName ?: JSONObject.NULL)
                     put("text", msg.text)
                     put("isFromMe", msg.isFromMe)
                     put("deliveryStatus", msg.deliveryStatus.name)
@@ -433,6 +435,7 @@ class MeshCoreBleManager(private val context: Context) {
                 val text = obj.optString("text", "")
                 if (targetId.isBlank() || text.isBlank()) continue
                 val senderName = if (obj.isNull("senderName")) null else obj.optString("senderName", "").ifBlank { null }
+                val rawSenderName = if (obj.isNull("rawSenderName")) null else obj.optString("rawSenderName", "").ifBlank { null }
                 val isFromMe = obj.optBoolean("isFromMe", false)
                 val statusName = obj.optString("deliveryStatus", DeliveryStatus.DELIVERED.name)
                 val status = try {
@@ -452,6 +455,7 @@ class MeshCoreBleManager(private val context: Context) {
                         id = id,
                         targetId = targetId,
                         senderName = senderName,
+                        rawSenderName = rawSenderName,
                         text = text,
                         isFromMe = isFromMe,
                         deliveryStatus = normalizedStatus,
@@ -1441,22 +1445,22 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    private fun resolveGroupSenderAndBody(rawPayload: String): Pair<String?, String> {
+    private fun resolveGroupSenderAndBody(rawPayload: String): Triple<String?, String?, String> {
         val colonSpaceIdx = rawPayload.indexOf(": ")
         if (colonSpaceIdx in 1..47) {
             val rawSender = rawPayload.substring(0, colonSpaceIdx).trim()
             val body = rawPayload.substring(colonSpaceIdx + 2).trim()
-            return resolveContactName(rawSender, _contacts.value) to body
+            return Triple(rawSender, resolveContactName(rawSender, _contacts.value), body)
         }
         val colonIdx = rawPayload.indexOf(":")
         if (colonIdx in 1..47) {
             val rawSender = rawPayload.substring(0, colonIdx).trim()
             val body = rawPayload.substring(colonIdx + 1).trim()
             if (body.isNotEmpty()) {
-                return resolveContactName(rawSender, _contacts.value) to body
+                return Triple(rawSender, resolveContactName(rawSender, _contacts.value), body)
             }
         }
-        return null to rawPayload.trim()
+        return Triple(null, null, rawPayload.trim())
     }
 
     private fun resolveContactName(
@@ -1667,13 +1671,14 @@ class MeshCoreBleManager(private val context: Context) {
         val allowedSet = prefs.getStringSet("allowed_channels", emptySet()) ?: emptySet()
         if (!allowedSet.contains(channelIndex.toString())) return
 
-        val (sender, body) = resolveGroupSenderAndBody(rawText)
+        val (rawSender, sender, body) = resolveGroupSenderAndBody(rawText)
         val targetId = "ch_$channelIndex"
         val safeTs = if (msgTimestampMs > 0L) msgTimestampMs else System.currentTimeMillis()
         updateMessages { list ->
             (list + ChatMessage(
                 targetId = targetId,
                 senderName = sender,
+                rawSenderName = rawSender ?: sender,
                 text = body,
                 isFromMe = false,
                 deliveryStatus = DeliveryStatus.DELIVERED,
