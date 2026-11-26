@@ -93,7 +93,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "2.7"
+        const val APP_VERSION: String = "2.8"
         const val MAX_CHANNELS: Int = 32
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
@@ -550,6 +550,36 @@ class MeshCoreBleManager(private val context: Context) {
         return if (hasLeadingHash) "#$allowedOnly" else allowedOnly
     }
 
+    private val _lastReadTimestamps = MutableStateFlow<Map<String, Long>>(loadLastReadTimestamps())
+    val lastReadTimestamps: StateFlow<Map<String, Long>> = _lastReadTimestamps
+
+    private fun loadLastReadTimestamps(): Map<String, Long> {
+        val raw = prefs.getString("last_read_timestamps_json", null) ?: return emptyMap()
+        return try {
+            val obj = JSONObject(raw)
+            val map = LinkedHashMap<String, Long>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                map[k] = obj.optLong(k, 0L)
+            }
+            map
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun saveLastReadTimestamps(map: Map<String, Long>) {
+        try {
+            val obj = JSONObject()
+            for ((k, v) in map) {
+                obj.put(k, v)
+            }
+            prefs.edit().putString("last_read_timestamps_json", obj.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
     private fun loadPersistedUnreadTargetIds(): Set<String> {
         return prefs.getStringSet("unread_target_ids", emptySet())?.toSet() ?: emptySet()
     }
@@ -559,6 +589,15 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun markTargetRead(targetId: String) {
+        val latestMsgTs = _messages.value
+            .filter { it.targetId == targetId }
+            .maxOfOrNull { it.timestamp } ?: System.currentTimeMillis()
+        val nowReadTs = maxOf(System.currentTimeMillis(), latestMsgTs)
+        val updatedTsMap = LinkedHashMap(_lastReadTimestamps.value)
+        updatedTsMap[targetId] = nowReadTs
+        saveLastReadTimestamps(updatedTsMap)
+        _lastReadTimestamps.value = updatedTsMap
+
         if (_unreadTargetIds.value.contains(targetId)) {
             val updated = _unreadTargetIds.value - targetId
             saveUnreadTargetIds(updated)

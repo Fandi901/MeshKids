@@ -331,15 +331,27 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
                     }
                 )
             } else {
+                val lastReadTimestamps by bleManager.lastReadTimestamps.collectAsState()
+                val chatOpenCutoffTs = remember(selectedTarget.id) {
+                    lastReadTimestamps[selectedTarget.id] ?: 0L
+                }
                 val orderedTargetMessages = remember(messages, selectedTarget.id) {
                     messages
                         .filter { it.targetId == selectedTarget.id }
-                        .sortedByDescending { it.timestamp }
-                        .take(20)
+                        .sortedBy { it.timestamp }
+                        .takeLast(20)
+                }
+                val firstUnreadMsgId = remember(orderedTargetMessages, chatOpenCutoffTs) {
+                    if (chatOpenCutoffTs <= 0L) {
+                        null
+                    } else {
+                        orderedTargetMessages.firstOrNull { !it.isFromMe && it.timestamp > chatOpenCutoffTs }?.id
+                    }
                 }
                 KidChatScreen(
                     target = selectedTarget,
                     messages = orderedTargetMessages,
+                    firstUnreadMessageId = firstUnreadMsgId,
                     quickReplies = quickReplies,
                     isConnected = isConnected,
                     onSendMessage = { text -> bleManager.sendMessage(selectedTarget, text) }
@@ -498,6 +510,7 @@ private fun buildLinkAnnotatedText(text: String, baseColor: Color, linkColor: Co
 fun KidChatScreen(
     target: ChatTarget,
     messages: List<ChatMessage>,
+    firstUnreadMessageId: String? = null,
     quickReplies: List<String>,
     isConnected: Boolean,
     onSendMessage: (String) -> Unit
@@ -630,10 +643,25 @@ fun KidChatScreen(
             }
         }
         val chatListState = androidx.compose.foundation.lazy.rememberLazyListState()
-        val topMessageKey = messages.firstOrNull()?.id
-        LaunchedEffect(target.id, topMessageKey) {
-            if (messages.isNotEmpty()) {
-                chatListState.scrollToItem(0)
+        val lastMsg = messages.lastOrNull()
+        val lastMessageKey = lastMsg?.id
+        val lastIsFromMe = lastMsg?.isFromMe == true
+        val firstUnreadIndex = remember(messages, firstUnreadMessageId) {
+            if (firstUnreadMessageId == null) -1 else messages.indexOfFirst { it.id == firstUnreadMessageId }
+        }
+        LaunchedEffect(target.id, lastMessageKey, messages.size, firstUnreadIndex) {
+            if (messages.isEmpty()) return@LaunchedEffect
+            if (lastIsFromMe || firstUnreadIndex <= 0) {
+                chatListState.scrollToItem(messages.lastIndex)
+            } else {
+                // Scroll to bottom first so newest messages appear at bottom when they all fit
+                chatListState.scrollToItem(messages.lastIndex)
+                kotlinx.coroutines.yield()
+                val firstVisible = chatListState.firstVisibleItemIndex
+                // If the first unread message was pushed off the top edge, pin it at the top edge instead
+                if (firstVisible > firstUnreadIndex) {
+                    chatListState.scrollToItem(firstUnreadIndex)
+                }
             }
         }
         LazyColumn(
@@ -643,6 +671,7 @@ fun KidChatScreen(
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
             items(messages, key = { it.id }) { msg ->
+                val isFirstUnread = (firstUnreadMessageId != null && msg.id == firstUnreadMessageId)
                 val isGroupMsg = target.type == ChatTargetType.CHANNEL ||
                     msg.deliveryStatus == DeliveryStatus.GROUP_SENT ||
                     msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER ||
@@ -676,6 +705,31 @@ fun KidChatScreen(
                     else -> redPendingOrFailedColor
                 }
 
+                if (isFirstUnread) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFFEF6C00))
+                        Surface(
+                            color = Color(0xFFFFF3E0),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Color(0xFFEF6C00))
+                        ) {
+                            Text(
+                                text = "Ungelesene Nachrichten",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE65100),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                        HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFFEF6C00))
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = if (msg.isFromMe) Arrangement.End else Arrangement.Start
@@ -903,8 +957,138 @@ fun ParentSettingsScreen(
     var manualAliasName by remember { mutableStateOf("") }
     var kidName by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
+    var scopePopupChannel by remember { mutableStateOf<MeshChannel?>(null) }
 
     var infoBanner by remember { mutableStateOf<String?>(null) }
+
+    if (scopePopupChannel != null) {
+        val targetCh = scopePopupChannel!!
+        var popupScopeField by remember(targetCh.index) { mutableStateOf(targetCh.regionScope) }
+        var popupMenuExpanded by remember(targetCh.index) { mutableStateOf(false) }
+        val popupFilteredScopes = remember(popupScopeField) {
+            val q = popupScopeField.trim().lowercase()
+            if (q.isEmpty()) {
+                MeshCoreBleManager.KNOWN_SCOPES.take(10)
+            } else {
+                val startsWithMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                    it.lowercase().startsWith(q)
+                }
+                val containsMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                    !it.lowercase().startsWith(q) && it.lowercase().contains(q)
+                }
+                (startsWithMatches + containsMatches).take(10)
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { scopePopupChannel = null },
+            title = {
+                Text(
+                    text = "Kanal ${targetCh.index} freigegeben",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFFFF8E1),
+                    border = BorderStroke(1.5.dp, Color(0xFFF57C00))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                color = Color(0xFFEF6C00),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "SCOPE",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            Text(
+                                text = "Region / Scope für ${targetCh.displayName}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE65100)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ExposedDropdownMenuBox(
+                            expanded = popupMenuExpanded && popupFilteredScopes.isNotEmpty(),
+                            onExpandedChange = { expanded ->
+                                popupMenuExpanded = expanded && popupFilteredScopes.isNotEmpty()
+                            }
+                        ) {
+                            OutlinedTextField(
+                                value = popupScopeField,
+                                onValueChange = { raw ->
+                                    if (raw.length <= 32) {
+                                        popupScopeField = raw
+                                        popupMenuExpanded = popupFilteredScopes.isNotEmpty()
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .menuAnchor()
+                                    .onFocusChanged { focusState ->
+                                        if (focusState.isFocused && popupFilteredScopes.isNotEmpty()) {
+                                            popupMenuExpanded = true
+                                        }
+                                    },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White,
+                                    focusedBorderColor = Color(0xFFEF6C00),
+                                    unfocusedBorderColor = Color(0xFFFF9800)
+                                ),
+                                placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, nrw)") },
+                                singleLine = true
+                            )
+                            ExposedDropdownMenu(
+                                expanded = popupMenuExpanded && popupFilteredScopes.isNotEmpty(),
+                                onDismissRequest = { popupMenuExpanded = false }
+                            ) {
+                                popupFilteredScopes.forEach { candidateScope ->
+                                    DropdownMenuItem(
+                                        text = { Text(candidateScope) },
+                                        onClick = {
+                                            popupScopeField = candidateScope
+                                            popupMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    bleManager.setChannelRegionScope(targetCh.index, popupScopeField)
+                    infoBanner = if (popupScopeField.isNotBlank()) {
+                        "Scope '${popupScopeField.trim()}' für Kanal ${targetCh.index} gespeichert."
+                    } else {
+                        "Kanal ${targetCh.index} ohne Scope freigegeben."
+                    }
+                    scopePopupChannel = null
+                }) {
+                    Text("Speichern")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { scopePopupChannel = null }) {
+                    Text("Ohne Scope")
+                }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -1348,7 +1532,12 @@ fun ParentSettingsScreen(
                                         }
                                         Switch(
                                             checked = channel.isAllowedForKid,
-                                            onCheckedChange = { bleManager.toggleChannelAllowed(channel.index, it) }
+                                            onCheckedChange = { enabled ->
+                                                bleManager.toggleChannelAllowed(channel.index, enabled)
+                                                if (enabled) {
+                                                    scopePopupChannel = channel
+                                                }
+                                            }
                                         )
                                     }
                                     Spacer(modifier = Modifier.height(6.dp))
