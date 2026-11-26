@@ -457,7 +457,7 @@ fun KidTargetListScreen(
     }
 }
 
-private val LINK_REGEX = Regex("(https?://[^\s]+|www\.[^\s]+)", RegexOption.IGNORE_CASE)
+private val LINK_REGEX = Regex("(https?://[^\\s]+|www\\.[^\\s]+)", RegexOption.IGNORE_CASE)
 
 private fun buildLinkAnnotatedText(text: String, baseColor: Color, linkColor: Color): AnnotatedString {
     return buildAnnotatedString {
@@ -668,10 +668,7 @@ fun KidChatScreen(
                                     },
                                     onPress = {
                                         if (!canReplyInGroup) return@detectTapGestures
-                                        val triggered = tryAwaitRelease()
-                                        // Fallback if pressed ~2s; onLongPress handles ~500ms+, wait 2000ms for explicit 2s hold
-                                        if (!triggered) {
-                                        }
+                                        tryAwaitRelease()
                                     },
                                     onLongPress = {
                                         if (canReplyInGroup) {
