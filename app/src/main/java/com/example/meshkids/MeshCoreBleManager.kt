@@ -269,9 +269,7 @@ class MeshCoreBleManager(private val context: Context) {
     private val _wifiHostOrDyndns = MutableStateFlow(prefs.getString("wifi_host_or_dyndns", "") ?: "")
     val wifiHostOrDyndns: StateFlow<String> = _wifiHostOrDyndns
 
-    private val _wifiPort = MutableStateFlow(
-        prefs.getInt("wifi_port", DEFAULT_WIFI_PORT).takeIf { it in 1..65535 } ?: DEFAULT_WIFI_PORT
-    )
+    private val _wifiPort = MutableStateFlow(prefs.getInt("wifi_port", DEFAULT_WIFI_PORT).takeIf { it in 1..65535 } ?: DEFAULT_WIFI_PORT)
     val wifiPort: StateFlow<Int> = _wifiPort
 
     private var wifiSocket: java.net.Socket? = null
@@ -305,75 +303,6 @@ class MeshCoreBleManager(private val context: Context) {
             context.registerReceiver(btStateReceiver, filter)
         }
         startReconnectWatchdog()
-    }
-
-    private fun sanitizeText(input: String): String {
-        val sb = StringBuilder(input.length)
-        var i = 0
-        while (i < input.length) {
-            val cp = input.codePointAt(i)
-            val charCount = Character.charCount(cp)
-            val isControl = Character.isISOControl(cp) && cp != 10 && cp != 13
-            val isReplacementChar = cp == 0xFFFD
-            val isPrivateUse = cp in 0xE000..0xF8FF
-            if (!isControl && !isReplacementChar && !isPrivateUse) {
-                sb.appendCodePoint(cp)
-            }
-            i += charCount
-        }
-        return sb.toString().replace("\r", " ").replace("\n", " ").trim()
-    }
-
-    private fun loadManualGroupAliases(): Map<String, String> {
-        val rawJson = prefs.getString("manual_group_aliases_json", null) ?: return emptyMap()
-        return try {
-            val obj = JSONObject(rawJson)
-            val map = LinkedHashMap<String, String>()
-            val keys = obj.keys()
-            while (keys.hasNext()) {
-                val k = sanitizeText(keys.next()).take(48)
-                val v = sanitizeText(obj.optString(k, "")).take(24)
-                if (k.isNotBlank() && v.isNotBlank()) {
-                    map[k] = v
-                }
-            }
-            map
-        } catch (_: Exception) {
-            emptyMap()
-        }
-    }
-
-    private fun saveManualGroupAliases(map: Map<String, String>) {
-        try {
-            val obj = JSONObject()
-            for ((k, v) in map) {
-                if (k.isNotBlank() && v.isNotBlank()) {
-                    obj.put(k, v)
-                }
-            }
-            prefs.edit().putString("manual_group_aliases_json", obj.toString()).apply()
-        } catch (_: Exception) {
-        }
-    }
-
-    fun addOrUpdateManualGroupAlias(chatName: String, alias: String) {
-        val cleanChatName = sanitizeText(chatName).take(48)
-        val cleanAlias = sanitizeText(alias).take(24)
-        if (cleanChatName.isBlank() || cleanAlias.isBlank()) return
-        val updated = LinkedHashMap(_manualGroupAliases.value)
-        updated[cleanChatName] = cleanAlias
-        saveManualGroupAliases(updated)
-        _manualGroupAliases.value = updated
-        refreshExistingMessageSenderNames(_contacts.value, updated)
-    }
-
-    fun removeManualGroupAlias(chatName: String) {
-        if (!_manualGroupAliases.value.containsKey(chatName)) return
-        val updated = LinkedHashMap(_manualGroupAliases.value)
-        updated.remove(chatName)
-        saveManualGroupAliases(updated)
-        _manualGroupAliases.value = updated
-        refreshExistingMessageSenderNames(_contacts.value, updated)
     }
 
     private fun loadQuickReplies(): List<String> {
@@ -553,9 +482,9 @@ class MeshCoreBleManager(private val context: Context) {
         val withoutLeadingHash = cleanedBasic.removePrefix("#").trim()
 
         val markerCut = withoutLeadingHash
-            .replace(Regex("\\)[A-Za-z0-9%\\[_~^}!?=+/*$*@#].*$"), "")
-            .replace(Regex("yLn=[a-zA-Z0-9=+!?/\\)_\\[\\]~^}\\$-]*$"), "")
-            .replace(Regex("[)=!?%\\[_~^}+/*$*@#].*$"), "")
+            .replace(Regex("\\)[A-Za-z0-9%\[_~^}\!\?\=\+\/\$\*\@\#].*$"), "")
+            .replace(Regex("yLn=[a-zA-Z0-9=+!?/\)_\[\]~^}\$-]*$"), "")
+            .replace(Regex("[)=!?%\[_~^}\+\/\$\*\@\#].*$"), "")
             .trim()
 
         val allowedOnly = markerCut
@@ -1192,6 +1121,58 @@ class MeshCoreBleManager(private val context: Context) {
         for (idx in 0 until MAX_CHANNELS) {
             enqueueCommand(byteArrayOf(CMD_GET_CHANNEL, idx.toByte()))
         }
+    }
+
+    private fun loadManualGroupAliases(): Map<String, String> {
+        val rawJson = prefs.getString("manual_group_aliases_json", null) ?: return emptyMap()
+        return try {
+            val obj = JSONObject(rawJson)
+            val map = LinkedHashMap<String, String>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = sanitizeText(keys.next()).take(48)
+                val v = sanitizeText(obj.optString(k, "")).take(24)
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    map[k] = v
+                }
+            }
+            map
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun saveManualGroupAliases(map: Map<String, String>) {
+        try {
+            val obj = JSONObject()
+            for ((k, v) in map) {
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    obj.put(k, v)
+                }
+            }
+            prefs.edit().putString("manual_group_aliases_json", obj.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    fun addOrUpdateManualGroupAlias(chatName: String, alias: String) {
+        val cleanChatName = sanitizeText(chatName).take(48)
+        val cleanAlias = sanitizeText(alias).take(24)
+        if (cleanChatName.isBlank() || cleanAlias.isBlank()) return
+        val updated = LinkedHashMap(_manualGroupAliases.value)
+        updated[cleanChatName] = cleanAlias
+        saveManualGroupAliases(updated)
+        _manualGroupAliases.value = updated
+        refreshExistingMessageSenderNames(_contacts.value, updated)
+    }
+
+    fun removeManualGroupAlias(chatName: String) {
+        if (!_manualGroupAliases.value.containsKey(chatName)) return
+        val updated = LinkedHashMap(_manualGroupAliases.value)
+        updated.remove(chatName)
+        saveManualGroupAliases(updated)
+        _manualGroupAliases.value = updated
+        refreshExistingMessageSenderNames(_contacts.value, updated)
     }
 
     fun setContactAlias(prefixHex: String, alias: String) {
@@ -1831,6 +1812,23 @@ class MeshCoreBleManager(private val context: Context) {
     private fun decodeCleanUtf8(bytes: ByteArray): String {
         val raw = String(bytes, Charsets.UTF_8).trimEnd('\u0000')
         return sanitizeText(raw)
+    }
+
+    private fun sanitizeText(input: String): String {
+        val sb = StringBuilder(input.length)
+        var i = 0
+        while (i < input.length) {
+            val cp = input.codePointAt(i)
+            val charCount = Character.charCount(cp)
+            val isControl = Character.isISOControl(cp) && cp != 10 && cp != 13
+            val isReplacementChar = cp == 0xFFFD
+            val isPrivateUse = cp in 0xE000..0xF8FF
+            if (!isControl && !isReplacementChar && !isPrivateUse) {
+                sb.appendCodePoint(cp)
+            }
+            i += charCount
+        }
+        return sb.toString().replace("\r", " ").replace("\n", " ").trim()
     }
 
     private fun addIncomingContactMessageIfAllowed(prefixHex: String, text: String, msgTimestampMs: Long = System.currentTimeMillis()) {
