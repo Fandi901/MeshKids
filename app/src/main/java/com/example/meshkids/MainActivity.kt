@@ -559,11 +559,17 @@ fun KidChatScreen(
                     enabled = isConnected && replyDraftText.isNotBlank(),
                     onClick = {
                         var body = replyDraftText.trim()
+                        val bracketRawPrefix = "@[$meshCoreNodeName]"
+                        val bracketAliasPrefix = "@[$displayAliasName]"
                         val aliasColonPrefix = "$displayAliasName:"
                         val rawColonPrefix = "$meshCoreNodeName:"
                         val atRawPrefix = "@$meshCoreNodeName"
                         val atAliasPrefix = "@$displayAliasName"
                         body = when {
+                            body.startsWith(bracketRawPrefix, ignoreCase = true) ->
+                                body.substring(bracketRawPrefix.length).trimStart(':', ' ')
+                            body.startsWith(bracketAliasPrefix, ignoreCase = true) ->
+                                body.substring(bracketAliasPrefix.length).trimStart(':', ' ')
                             body.startsWith(atRawPrefix, ignoreCase = true) ->
                                 body.substring(atRawPrefix.length).trimStart(':', ' ')
                             body.startsWith(atAliasPrefix, ignoreCase = true) ->
@@ -575,7 +581,7 @@ fun KidChatScreen(
                             else -> body
                         }
                         if (body.isNotBlank()) {
-                            val fullMsg = "@$meshCoreNodeName $body".take(133)
+                            val fullMsg = "@[$meshCoreNodeName] $body".take(133)
                             onSendMessage(fullMsg)
                             replyTargetMsg = null
                             replyDraftText = ""
