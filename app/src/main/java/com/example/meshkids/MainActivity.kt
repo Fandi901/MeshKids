@@ -843,7 +843,7 @@ fun ParentPinDialog(
     var error by remember { mutableStateOf(false) }
 
     fun appendDigit(d: String) {
-        if (enteredPin.length < 12) {
+        if (enteredPin.length < ParentPinManager.MAX_PIN_LENGTH) {
             enteredPin += d
             error = false
         }
@@ -859,7 +859,7 @@ fun ParentPinDialog(
                 OutlinedTextField(
                     value = enteredPin,
                     onValueChange = { raw ->
-                        enteredPin = raw.filter { it.isDigit() }.take(12)
+                        enteredPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
                         error = false
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -957,6 +957,8 @@ fun ParentSettingsScreen(
     var manualAliasName by remember { mutableStateOf("") }
     var kidName by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
+    var confirmPin by remember { mutableStateOf("") }
+    var pinError by remember { mutableStateOf<String?>(null) }
     var scopePopupChannel by remember { mutableStateOf<MeshChannel?>(null) }
 
     var infoBanner by remember { mutableStateOf<String?>(null) }
@@ -1727,25 +1729,61 @@ fun ParentSettingsScreen(
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("5. Admin-PIN ändern", fontWeight = FontWeight.Bold)
+                Text(
+                    "${ParentPinManager.MIN_PIN_LENGTH}–${ParentPinManager.MAX_PIN_LENGTH} Ziffern, nur 0–9.",
+                    fontSize = 13.sp,
+                    color = Color.Gray
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = newPin,
+                    onValueChange = { raw ->
+                        newPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
+                        pinError = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    placeholder = { Text("Neue PIN") },
+                    singleLine = true,
+                    isError = pinError != null
+                )
+                Spacer(modifier = Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
-                        value = newPin,
-                        onValueChange = { newPin = it },
+                        value = confirmPin,
+                        onValueChange = { raw ->
+                            confirmPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
+                            pinError = null
+                        },
                         modifier = Modifier.weight(1f),
+                        visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                        placeholder = { Text("Neue PIN (min. 4 Ziffern)") },
-                        singleLine = true
+                        placeholder = { Text("Neue PIN wiederholen") },
+                        singleLine = true,
+                        isError = pinError != null
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(onClick = {
-                        if (newPin.length >= 4) {
-                            pinManager.setPin(newPin)
+                        pinError = when {
+                            !ParentPinManager.isValidPin(newPin) ->
+                                "PIN muss ${ParentPinManager.MIN_PIN_LENGTH}–${ParentPinManager.MAX_PIN_LENGTH} Ziffern haben."
+                            newPin != confirmPin -> "Die beiden PINs stimmen nicht überein."
+                            !pinManager.setPin(newPin) -> "PIN konnte nicht gespeichert werden."
+                            else -> null
+                        }
+                        if (pinError == null) {
                             newPin = ""
+                            confirmPin = ""
                             infoBanner = "Admin-PIN wurde geändert."
                         }
                     }) {
                         Text("PIN setzen")
                     }
+                }
+                pinError?.let {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
                 }
             }
 
