@@ -109,7 +109,18 @@ class MeshCoreBleManager(private val context: Context) {
             "herne", "hagen", "unna", "en-kreis", "rheinland",
             "niederrhein", "muensterland", "sauerland", "bergischesland",
             "koeln", "duesseldorf", "bonn", "aachen", "bielefeld", "muenster",
-            "de", "deutschland", "dach", "at", "oesterreich", "ch", "schweiz",
+            "de", "deutschland", "dach", "at", "oesterreich", "austria",
+            "at-1", "burgenland", "eisenstadt",
+            "at-2", "kaernten", "karnten", "klagenfurt", "villach",
+            "at-3", "niederoesterreich", "noe", "st-poelten", "wiener-neustadt",
+            "at-4", "oberoesterreich", "ooe", "linz", "wels", "steyr",
+            "at-5", "salzburg",
+            "at-6", "steiermark", "graz", "leoben",
+            "at-7", "tirol", "innsbruck",
+            "at-8", "vorarlberg", "bregenz", "dornbirn", "feldkirch",
+            "at-9", "wien", "vienna",
+            "alpen", "salzkammergut", "wachau", "muehlviertel", "innviertel", "waldviertel", "weinviertel",
+            "ch", "schweiz",
             "eu", "europa", "norddeutschland", "sueddeutschland",
             "ostdeutschland", "westdeutschland", "de-by", "bayern", "muenchen",
             "de-bw", "stuttgart", "de-ni", "hannover", "de-he", "frankfurt",
@@ -293,6 +304,7 @@ class MeshCoreBleManager(private val context: Context) {
 
     private val btStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
+            if (_connectionMode.value != "BLE") return
             if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
                 val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
                 if (state == BluetoothAdapter.STATE_ON && !manualDisconnect) {
@@ -655,11 +667,13 @@ class MeshCoreBleManager(private val context: Context) {
         manualDisconnect = false
 
         if (normalizedMode == "WIFI") {
+            _isConnected.value = false
             disconnectBleQuietly()
             if (connectNow) {
                 connectWifi(_wifiHostOrDyndns.value, _wifiPort.value)
             }
         } else {
+            _isConnected.value = false
             disconnectWifiQuietly(cancelReaderJob = true)
             if (connectNow) {
                 autoConnectIfSaved()
@@ -749,6 +763,7 @@ class MeshCoreBleManager(private val context: Context) {
             var socket: java.net.Socket? = null
             try {
                 val newSocket = java.net.Socket()
+                wifiSocket = newSocket
                 socket = newSocket
                 val address = java.net.InetSocketAddress(targetHost, safePort)
                 newSocket.connect(address, WIFI_CONNECT_TIMEOUT_MS)
@@ -889,6 +904,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     private suspend fun attemptReconnectOnce(addressOverride: String? = null) {
+        if (_connectionMode.value != "BLE") return
         if (manualDisconnect || _isConnected.value || isConnecting) return
         val savedAddress = addressOverride ?: prefs.getString("saved_mac", null) ?: return
         val adapter = bluetoothAdapter ?: return
