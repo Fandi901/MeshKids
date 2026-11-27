@@ -949,9 +949,23 @@ fun ParentSettingsScreen(
     var kidName by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
     var confirmNewPin by remember { mutableStateOf("") }
+    var pinErrorPopupMessage by remember { mutableStateOf<String?>(null) }
     var scopePopupChannel by remember { mutableStateOf<MeshChannel?>(null) }
 
     var infoBanner by remember { mutableStateOf<String?>(null) }
+
+    if (pinErrorPopupMessage != null) {
+        AlertDialog(
+            onDismissRequest = { pinErrorPopupMessage = null },
+            title = { Text("Admin-PIN ungültig") },
+            text = { Text(pinErrorPopupMessage!!) },
+            confirmButton = {
+                Button(onClick = { pinErrorPopupMessage = null }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
 
     if (scopePopupChannel != null) {
         val targetCh = scopePopupChannel!!
@@ -1308,24 +1322,29 @@ fun ParentSettingsScreen(
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             OutlinedButton(
                                 onClick = { if (safePage > 0) contactPage = safePage - 1 },
-                                enabled = safePage > 0
+                                enabled = safePage > 0,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                             ) {
-                                Text("◀ Zurück")
+                                Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
                             }
                             Text(
                                 text = "Seite ${safePage + 1} / $totalPages (${sortedContacts.size} Kontakte)",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
+                                modifier = Modifier.weight(1f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2
                             )
                             OutlinedButton(
                                 onClick = { if (safePage < totalPages - 1) contactPage = safePage + 1 },
-                                enabled = safePage < totalPages - 1
+                                enabled = safePage < totalPages - 1,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                             ) {
-                                Text("Weiter ▶")
+                                Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
                             }
                         }
 
@@ -1390,24 +1409,29 @@ fun ParentSettingsScreen(
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 OutlinedButton(
                                     onClick = { if (safePage > 0) contactPage = safePage - 1 },
-                                    enabled = safePage > 0
+                                    enabled = safePage > 0,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                                 ) {
-                                    Text("◀ Zurück")
+                                    Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
                                 }
                                 Text(
                                     text = "Seite ${safePage + 1} / $totalPages",
-                                    fontSize = 13.sp,
-                                    color = Color.Gray
+                                    modifier = Modifier.weight(1f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    fontSize = 12.sp,
+                                    color = Color.Gray,
+                                    maxLines = 2
                                 )
                                 OutlinedButton(
                                     onClick = { if (safePage < totalPages - 1) contactPage = safePage + 1 },
-                                    enabled = safePage < totalPages - 1
+                                    enabled = safePage < totalPages - 1,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                                 ) {
-                                    Text("Weiter ▶")
+                                    Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
                                 }
                             }
                         }
@@ -1544,24 +1568,29 @@ fun ParentSettingsScreen(
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             OutlinedButton(
                                 onClick = { if (safeChannelPage > 0) channelPage = safeChannelPage - 1 },
-                                enabled = safeChannelPage > 0
+                                enabled = safeChannelPage > 0,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                             ) {
-                                Text("◀ Zurück")
+                                Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
                             }
                             Text(
                                 text = "Seite ${safeChannelPage + 1} / $totalChannelPages (${sortedChannels.size} Kanäle)",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold
+                                modifier = Modifier.weight(1f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2
                             )
                             OutlinedButton(
                                 onClick = { if (safeChannelPage < totalChannelPages - 1) channelPage = safeChannelPage + 1 },
-                                enabled = safeChannelPage < totalChannelPages - 1
+                                enabled = safeChannelPage < totalChannelPages - 1,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                             ) {
-                                Text("Weiter ▶")
+                                Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
                             }
                         }
 
@@ -1745,24 +1774,29 @@ fun ParentSettingsScreen(
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 OutlinedButton(
                                     onClick = { if (safeChannelPage > 0) channelPage = safeChannelPage - 1 },
-                                    enabled = safeChannelPage > 0
+                                    enabled = safeChannelPage > 0,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                                 ) {
-                                    Text("◀ Zurück")
+                                    Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
                                 }
                                 Text(
                                     text = "Seite ${safeChannelPage + 1} / $totalChannelPages",
-                                    fontSize = 13.sp,
-                                    color = Color.Gray
+                                    modifier = Modifier.weight(1f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    fontSize = 12.sp,
+                                    color = Color.Gray,
+                                    maxLines = 2
                                 )
                                 OutlinedButton(
                                     onClick = { if (safeChannelPage < totalChannelPages - 1) channelPage = safeChannelPage + 1 },
-                                    enabled = safeChannelPage < totalChannelPages - 1
+                                    enabled = safeChannelPage < totalChannelPages - 1,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                                 ) {
-                                    Text("Weiter ▶")
+                                    Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
                                 }
                             }
                         }
@@ -1827,18 +1861,19 @@ fun ParentSettingsScreen(
                     onClick = {
                         when {
                             !ParentPinManager.isValidPin(newPin) -> {
-                                infoBanner = "Fehler: Die PIN muss aus 4–12 Ziffern (0–9) bestehen."
+                                pinErrorPopupMessage = "Die Admin-PIN muss aus 4 bis 12 Ziffern (0–9) bestehen."
                             }
                             newPin != confirmNewPin -> {
-                                infoBanner = "Fehler: Die beiden PIN-Eingaben stimmen nicht überein."
+                                pinErrorPopupMessage = "Die beiden eingegebenen PINs stimmen nicht überein. Bitte beide Felder identisch ausfüllen."
                             }
                             pinManager.setPin(newPin) -> {
                                 newPin = ""
                                 confirmNewPin = ""
+                                pinErrorPopupMessage = null
                                 infoBanner = "Admin-PIN wurde geändert."
                             }
                             else -> {
-                                infoBanner = "Fehler: Admin-PIN konnte nicht gespeichert werden."
+                                pinErrorPopupMessage = "Die Admin-PIN konnte nicht gespeichert werden."
                             }
                         }
                     },
