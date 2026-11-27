@@ -1,10 +1,14 @@
 package com.example.meshkids
 
 import android.content.Context
-import java.security.MessageDigest
 
 class ParentPinManager(context: Context) {
+    private val prefs = context.getSharedPreferences("meshkids_pin_prefs", Context.MODE_PRIVATE)
+
     companion object {
+        private const val KEY_PIN = "parent_pin"
+        private const val DEFAULT_PIN = "1234"
+
         const val MIN_PIN_LENGTH = 4
         const val MAX_PIN_LENGTH = 12
 
@@ -13,28 +17,16 @@ class ParentPinManager(context: Context) {
             pin.length in MIN_PIN_LENGTH..MAX_PIN_LENGTH && pin.all { it in '0'..'9' }
     }
 
-    private val prefs = context.getSharedPreferences("meshkids_security", Context.MODE_PRIVATE)
-
-    init {
-        if (!prefs.contains("pin_hash")) {
-            setPin("1234")
-        }
-    }
-
-    fun verifyPin(inputPin: String): Boolean {
-        val savedHash = prefs.getString("pin_hash", null) ?: return false
-        return hashPin(inputPin) == savedHash
+    fun verifyPin(entered: String): Boolean {
+        val saved = prefs.getString(KEY_PIN, DEFAULT_PIN) ?: DEFAULT_PIN
+        return entered.trim() == saved
     }
 
     /** Returns false (and keeps the old PIN) if [newPin] is not 4–12 digits. */
     fun setPin(newPin: String): Boolean {
-        if (!isValidPin(newPin)) return false
-        prefs.edit().putString("pin_hash", hashPin(newPin)).apply()
+        val cleaned = newPin.trim()
+        if (!isValidPin(cleaned)) return false
+        prefs.edit().putString(KEY_PIN, cleaned).apply()
         return true
-    }
-
-    private fun hashPin(pin: String): String {
-        val bytes = MessageDigest.getInstance("SHA-256").digest(pin.toByteArray())
-        return bytes.joinToString("") { "%02x".format(it) }
     }
 }

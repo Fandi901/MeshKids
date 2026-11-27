@@ -16,10 +16,10 @@ import android.media.RingtoneManager
 import android.os.Build
 import android.os.ParcelUuid
 import kotlinx.coroutines.*
-import org.json.JSONArray
-import org.json.JSONObject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -40,7 +40,7 @@ data class MeshContact(
     val originalName: String,
     val aliasName: String,
     val isAllowedForKid: Boolean = false,
-    val nodeType: Int = 1 // 1 = Chat/Kontakt, 2 = Repeater, 3 = Room Server
+    val nodeType: Int = 1
 ) {
     val displayName: String
         get() = aliasName.trim().ifBlank { originalName.trim() }
@@ -93,7 +93,7 @@ class MeshCoreBleManager(private val context: Context) {
         const val CHANNEL_SEND_MIN_SPACING_MS: Long = 2_500L
         const val SCOPE_TO_MSG_GAP_MS: Long = 220L
         const val RECONNECT_INTERVAL_MS: Long = 4_000L
-        const val APP_VERSION: String = "2.8"
+        const val APP_VERSION: String = "2.9"
         const val MAX_CHANNELS: Int = 32
         const val MAX_MESSAGES_PER_TARGET: Int = 20
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
@@ -103,87 +103,21 @@ class MeshCoreBleManager(private val context: Context) {
             "Kannst du mich abholen?"
         )
         val KNOWN_SCOPES: List<String> = listOf(
-            "ruhrgebiet",
-            "ruhr",
-            "pott",
-            "nrw",
-            "de-nw",
-            "essen",
-            "bochum",
-            "dortmund",
-            "duisburg",
-            "gelsenkirchen",
-            "oberhausen",
-            "bottrop",
-            "recklinghausen",
-            "mulheim",
-            "muelheim",
-            "herne",
-            "hagen",
-            "unna",
-            "en-kreis",
-            "rheinland",
-            "niederrhein",
-            "muensterland",
-            "sauerland",
-            "bergischesland",
-            "koeln",
-            "duesseldorf",
-            "bonn",
-            "aachen",
-            "bielefeld",
-            "muenster",
-            "de",
-            "deutschland",
-            "dach",
-            "at",
-            "oesterreich",
-            "ch",
-            "schweiz",
-            "eu",
-            "europa",
-            "norddeutschland",
-            "sueddeutschland",
-            "ostdeutschland",
-            "westdeutschland",
-            "de-by",
-            "bayern",
-            "muenchen",
-            "de-bw",
-            "stuttgart",
-            "de-ni",
-            "hannover",
-            "de-he",
-            "frankfurt",
-            "de-sn",
-            "leipzig",
-            "dresden",
-            "de-rp",
-            "de-sl",
-            "de-bb",
-            "berlin",
-            "de-mv",
-            "de-sh",
-            "de-hh",
-            "hamburg",
-            "de-hb",
-            "bremen",
-            "de-st",
-            "de-th",
-            "nuernberg",
-            "nl",
-            "be",
-            "familie",
-            "zuhause",
-            "radeln",
-            "wandern",
-            "notfunk",
-            "mesh",
-            "lora",
-            "local",
-            "region",
-            "world",
-            "test"
+            "ruhrgebiet", "ruhr", "pott", "nrw", "de-nw",
+            "essen", "bochum", "dortmund", "duisburg", "gelsenkirchen",
+            "oberhausen", "bottrop", "recklinghausen", "mulheim", "muelheim",
+            "herne", "hagen", "unna", "en-kreis", "rheinland",
+            "niederrhein", "muensterland", "sauerland", "bergischesland",
+            "koeln", "duesseldorf", "bonn", "aachen", "bielefeld", "muenster",
+            "de", "deutschland", "dach", "at", "oesterreich", "ch", "schweiz",
+            "eu", "europa", "norddeutschland", "sueddeutschland",
+            "ostdeutschland", "westdeutschland", "de-by", "bayern", "muenchen",
+            "de-bw", "stuttgart", "de-ni", "hannover", "de-he", "frankfurt",
+            "de-sn", "leipzig", "dresden", "de-rp", "de-sl", "de-bb", "berlin",
+            "de-mv", "de-sh", "de-hh", "hamburg", "de-hb", "bremen",
+            "de-st", "de-th", "nuernberg", "nl", "be", "familie", "zuhause",
+            "radeln", "wandern", "notfunk", "mesh", "lora", "local",
+            "region", "world", "test"
         )
 
         val SERVICE_UUID: UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
@@ -212,6 +146,8 @@ class MeshCoreBleManager(private val context: Context) {
         const val PUSH_SEND_CONFIRMED: Byte = 0x82.toByte()
         const val PUSH_MSG_WAITING: Byte = 0x83.toByte()
         const val PUSH_LOG_RX_DATA: Byte = 0x88.toByte()
+        const val DEFAULT_WIFI_PORT: Int = 5000
+        const val WIFI_CONNECT_TIMEOUT_MS: Int = 4000
     }
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -327,6 +263,20 @@ class MeshCoreBleManager(private val context: Context) {
     private val _incomingAlertCounter = MutableStateFlow(0L)
     val incomingAlertCounter: StateFlow<Long> = _incomingAlertCounter
 
+    private val _connectionMode = MutableStateFlow(prefs.getString("connection_mode", "BLE") ?: "BLE")
+    val connectionMode: StateFlow<String> = _connectionMode
+
+    private val _wifiHostOrDyndns = MutableStateFlow(prefs.getString("wifi_host_or_dyndns", "") ?: "")
+    val wifiHostOrDyndns: StateFlow<String> = _wifiHostOrDyndns
+
+    private val _wifiPort = MutableStateFlow(prefs.getInt("wifi_port", DEFAULT_WIFI_PORT).takeIf { it in 1..65535 } ?: DEFAULT_WIFI_PORT)
+    val wifiPort: StateFlow<Int> = _wifiPort
+
+    private var wifiSocket: java.net.Socket? = null
+    private var wifiOut: java.io.OutputStream? = null
+    private var wifiReaderJob: Job? = null
+    private var wifiConnecting: Boolean = false
+
     private var activeMediaPlayer: MediaPlayer? = null
 
     private val btStateReceiver = object : BroadcastReceiver() {
@@ -441,7 +391,7 @@ class MeshCoreBleManager(private val context: Context) {
                 val status = try {
                     DeliveryStatus.valueOf(statusName)
                 } catch (_: Exception) {
-                    if (isFromMe) DeliveryStatus.DELIVERED else DeliveryStatus.DELIVERED
+                    DeliveryStatus.DELIVERED
                 }
                 val normalizedStatus = when (status) {
                     DeliveryStatus.SENDING -> DeliveryStatus.FAILED
@@ -531,11 +481,10 @@ class MeshCoreBleManager(private val context: Context) {
         val hasLeadingHash = cleanedBasic.startsWith("#")
         val withoutLeadingHash = cleanedBasic.removePrefix("#").trim()
 
-        // Strip only non-name garbage markers/symbols; never strip real word endings like "schis" in "Frischis"
         val markerCut = withoutLeadingHash
-            .replace(Regex("\\)[A-Za-z0-9%\\[_~^}\\!\\?\\=\\+\\/\\$\\*\\@\\#].*$"), "")
-            .replace(Regex("yLn=[a-zA-Z0-9=+!?/\\)_\\[\\]~^}\$-]*$"), "")
-            .replace(Regex("[)=!?%\\[_~^}\\+\\/\\$\\*\\@\\#].*$"), "")
+            .replace(Regex("""\)[A-Za-z0-9%\[_~^}!\?=\+/\$\*@#].*$"""), "")
+            .replace(Regex("""yLn=[a-zA-Z0-9=+!?/\)_\[\]~^}\$-]*$"""), "")
+            .replace(Regex("""[)=!?%\[_~^}\+/\$\*@#].*$"""), "")
             .trim()
 
         val allowedOnly = markerCut
@@ -655,8 +604,161 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+    private fun normalizeHostInput(rawInput: String): String {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) return ""
+        val withoutScheme = trimmed.replace(Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://"), "")
+        val hostPart = withoutScheme.substringBefore("/").substringBefore("?").substringBefore("#").trim()
+        if (hostPart.startsWith("[") && hostPart.contains("]")) {
+            return hostPart.substringAfter("[").substringBefore("]").trim()
+        }
+        val colonCount = hostPart.count { it == ':' }
+        return if (colonCount == 1) {
+            hostPart.substringBefore(":").trim()
+        } else {
+            hostPart
+        }
+    }
+
+    fun updateWifiEndpoint(hostOrDyndns: String, port: Int, connectNow: Boolean = false) {
+        val cleanInput = hostOrDyndns.trim()
+        val safePort = if (port in 1..65535) port else DEFAULT_WIFI_PORT
+        prefs.edit()
+            .putString("wifi_host_or_dyndns", cleanInput)
+            .putInt("wifi_port", safePort)
+            .apply()
+        _wifiHostOrDyndns.value = cleanInput
+        _wifiPort.value = safePort
+
+        if (_connectionMode.value == "WIFI" && connectNow) {
+            manualDisconnect = false
+            connectWifi(cleanInput, safePort)
+        }
+    }
+
+    fun setConnectionMode(mode: String, connectNow: Boolean = true) {
+        val normalizedMode = if (mode.equals("WIFI", ignoreCase = true) || mode.equals("WLAN", ignoreCase = true)) "WIFI" else "BLE"
+        prefs.edit().putString("connection_mode", normalizedMode).apply()
+        _connectionMode.value = normalizedMode
+        manualDisconnect = false
+
+        if (normalizedMode == "WIFI") {
+            disconnectBleQuietly()
+            if (connectNow) {
+                connectWifi(_wifiHostOrDyndns.value, _wifiPort.value)
+            }
+        } else {
+            disconnectWifiQuietly()
+            if (connectNow) {
+                autoConnectIfSaved()
+            }
+        }
+    }
+
+    private fun disconnectBleQuietly() {
+        try {
+            stopScan()
+            bluetoothGatt?.disconnect()
+            bluetoothGatt?.close()
+        } catch (_: Exception) {
+        }
+        bluetoothGatt = null
+        rxCharacteristic = null
+        isConnecting = false
+        isWriting = false
+        awaitingCommandAck = false
+    }
+
+    private fun disconnectWifiQuietly() {
+        wifiReaderJob?.cancel()
+        wifiReaderJob = null
+        try {
+            wifiOut?.close()
+        } catch (_: Exception) {
+        }
+        try {
+            wifiSocket?.close()
+        } catch (_: Exception) {
+        }
+        wifiOut = null
+        wifiSocket = null
+        wifiConnecting = false
+        isWriting = false
+        awaitingCommandAck = false
+    }
+
+    fun connectWifi(hostOrDyndns: String = _wifiHostOrDyndns.value, port: Int = _wifiPort.value) {
+        val targetHost = normalizeHostInput(hostOrDyndns)
+        val safePort = if (port in 1..65535) port else DEFAULT_WIFI_PORT
+        if (targetHost.isEmpty()) {
+            _isConnected.value = false
+            _connectionState.value = "WLAN: IP oder DynDNS fehlt"
+            return
+        }
+        if (wifiConnecting) return
+
+        manualDisconnect = false
+        wifiConnecting = true
+        _isConnected.value = false
+        _connectionState.value = "WLAN verbinde ($targetHost:$safePort)..."
+
+        wifiReaderJob?.cancel()
+        wifiReaderJob = scope.launch {
+            try {
+                disconnectWifiQuietly()
+                wifiConnecting = true
+                val socket = java.net.Socket()
+                val address = java.net.InetSocketAddress(targetHost, safePort)
+                socket.connect(address, WIFI_CONNECT_TIMEOUT_MS)
+                socket.soTimeout = 0
+                socket.tcpNoDelay = true
+
+                val outStream = socket.getOutputStream()
+                val inStream = socket.getInputStream()
+
+                wifiSocket = socket
+                wifiOut = outStream
+                wifiConnecting = false
+                _isConnected.value = true
+                _connectionState.value = "WLAN verbunden ($targetHost:$safePort)"
+                initializeMeshCoreSession()
+
+                val buffer = ByteArray(1024)
+                while (isActive && !socket.isClosed && socket.isConnected) {
+                    val readCount = try {
+                        inStream.read(buffer)
+                    } catch (_: java.net.SocketException) {
+                        -1
+                    } catch (_: java.io.IOException) {
+                        -1
+                    }
+                    if (readCount <= 0) {
+                        break
+                    }
+                    val frame = buffer.copyOfRange(0, readCount)
+                    handleIncomingFrame(frame)
+                }
+            } catch (_: Exception) {
+            } finally {
+                val wasManual = manualDisconnect
+                disconnectWifiQuietly()
+                if (_connectionMode.value == "WIFI") {
+                    _isConnected.value = false
+                    _connectionState.value = if (wasManual) "Getrennt" else "WLAN getrennt – verbinde neu..."
+                }
+            }
+        }
+    }
+
     fun autoConnectIfSaved() {
         if (manualDisconnect) return
+        if (_connectionMode.value == "WIFI") {
+            val host = normalizeHostInput(_wifiHostOrDyndns.value)
+            if (host.isNotEmpty() && !_isConnected.value && !wifiConnecting) {
+                connectWifi(_wifiHostOrDyndns.value, _wifiPort.value)
+            }
+            return
+        }
         val savedAddress = prefs.getString("saved_mac", null) ?: return
         if (_isConnected.value && bluetoothGatt != null) return
         scheduleReconnect(immediate = true)
@@ -678,6 +780,13 @@ class MeshCoreBleManager(private val context: Context) {
             while (isActive) {
                 delay(RECONNECT_INTERVAL_MS)
                 if (manualDisconnect) continue
+                if (_connectionMode.value == "WIFI") {
+                    val host = normalizeHostInput(_wifiHostOrDyndns.value)
+                    if (host.isNotEmpty() && !_isConnected.value && !wifiConnecting) {
+                        connectWifi(_wifiHostOrDyndns.value, _wifiPort.value)
+                    }
+                    continue
+                }
                 val savedAddress = prefs.getString("saved_mac", null) ?: continue
                 if (_isConnected.value) {
                     isConnecting = false
@@ -1442,6 +1551,43 @@ class MeshCoreBleManager(private val context: Context) {
     private fun processNextCommand() {
         if (isWriting) return
         val next = commandQueue.poll() ?: return
+
+        if (_connectionMode.value == "WIFI") {
+            val out = wifiOut
+            val sock = wifiSocket
+            if (out == null || sock == null || sock.isClosed || !sock.isConnected) {
+                commandQueue.addFirst(next)
+                if (!wifiConnecting && normalizeHostInput(_wifiHostOrDyndns.value).isNotEmpty()) {
+                    connectWifi(_wifiHostOrDyndns.value, _wifiPort.value)
+                }
+                return
+            }
+            lastWrittenCommand = next
+            isWriting = true
+            awaitingCommandAck = false
+            scope.launch {
+                try {
+                    out.write(next)
+                    out.flush()
+                    isWriting = false
+                    val postWriteDelay = if (next.isNotEmpty() && next[0] == CMD_SET_FLOOD_SCOPE) {
+                        SCOPE_TO_MSG_GAP_MS
+                    } else {
+                        90L
+                    }
+                    delay(postWriteDelay)
+                    processNextCommand()
+                } catch (_: Exception) {
+                    isWriting = false
+                    commandQueue.addFirst(next)
+                    disconnectWifiQuietly()
+                    _isConnected.value = false
+                    _connectionState.value = "WLAN getrennt – verbinde neu..."
+                }
+            }
+            return
+        }
+
         val rx = rxCharacteristic ?: return
         val gatt = bluetoothGatt ?: return
 
@@ -1563,12 +1709,10 @@ class MeshCoreBleManager(private val context: Context) {
             }
             RESP_CONTACT -> {
                 if (frame.size >= 132) {
-                    // MeshCore RESP_CONTACT: [0]=0x03, [1..32]=pubKey (32B), [33]=type (1=Chat, 2=Repeater, 3=RoomServer)
                     val nodeType = if (frame.size > 33) (frame[33].toInt() and 0xFF) else 1
                     val prefixBytes = frame.copyOfRange(1, 7)
                     val prefixHex = prefixBytes.joinToString("") { "%02x".format(it) }
                     if (nodeType == 2) {
-                        // Repeater herausfiltern (nur Kontakte & Roomserver behalten)
                         val filtered = _contacts.value.filterNot { it.pubKeyPrefixHex == prefixHex }
                         if (filtered.size != _contacts.value.size) {
                             _contacts.value = filtered
@@ -1684,7 +1828,7 @@ class MeshCoreBleManager(private val context: Context) {
             }
             i += charCount
         }
-        return sb.toString().replace('\r', ' ').replace('\n', ' ').trim()
+        return sb.toString().replace("\r", " ").replace("\n", " ").trim()
     }
 
     private fun addIncomingContactMessageIfAllowed(prefixHex: String, text: String, msgTimestampMs: Long = System.currentTimeMillis()) {

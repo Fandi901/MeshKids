@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -27,17 +28,9 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -476,7 +469,7 @@ fun KidTargetListScreen(
     }
 }
 
-private val LINK_REGEX = Regex("(https?://[^\\s]+|www\\.[^\\s]+)", RegexOption.IGNORE_CASE)
+private val LINK_REGEX = Regex("""(https?://[^\s]+|www\.[^\s]+)""", RegexOption.IGNORE_CASE)
 
 private fun buildLinkAnnotatedText(text: String, baseColor: Color, linkColor: Color): AnnotatedString {
     return buildAnnotatedString {
@@ -654,11 +647,9 @@ fun KidChatScreen(
             if (lastIsFromMe || firstUnreadIndex <= 0) {
                 chatListState.scrollToItem(messages.lastIndex)
             } else {
-                // Scroll to bottom first so newest messages appear at bottom when they all fit
                 chatListState.scrollToItem(messages.lastIndex)
                 kotlinx.coroutines.yield()
                 val firstVisible = chatListState.firstVisibleItemIndex
-                // If the first unread message was pushed off the top edge, pin it at the top edge instead
                 if (firstVisible > firstUnreadIndex) {
                     chatListState.scrollToItem(firstUnreadIndex)
                 }
@@ -1135,34 +1126,113 @@ fun ParentSettingsScreen(
             }
 
             item {
+                val activeConnMode by bleManager.connectionMode.collectAsState()
+                val savedWifiHost by bleManager.wifiHostOrDyndns.collectAsState()
+                val savedWifiPort by bleManager.wifiPort.collectAsState()
+                var wifiHostInput by remember(savedWifiHost) { mutableStateOf(savedWifiHost) }
+                var wifiPortInput by remember(savedWifiPort) { mutableStateOf(savedWifiPort.toString()) }
+
                 Text("1. MeshCore Funkgerät koppeln ($connectionState)", fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {
-                        if (!checkBlePermissionsGranted()) {
-                            val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-                            } else {
-                                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                    FilterChip(
+                        selected = activeConnMode == "BLE",
+                        onClick = {
+                            bleManager.setConnectionMode("BLE", connectNow = true)
+                            infoBanner = "Verbindungsart: BLE"
+                        },
+                        label = { Text("BLE") }
+                    )
+                    FilterChip(
+                        selected = activeConnMode == "WIFI",
+                        onClick = {
+                            bleManager.setConnectionMode("WIFI", connectNow = false)
+                            if (wifiHostInput.isNotBlank()) {
+                                val parsedPort = wifiPortInput.trim().toIntOrNull() ?: MeshCoreBleManager.DEFAULT_WIFI_PORT
+                                bleManager.updateWifiEndpoint(wifiHostInput, parsedPort, connectNow = true)
                             }
-                            infoBanner = "Bitte Bluetooth-Berechtigungen erteilen..."
-                            requestBlePermissions(perms)
-                        } else {
-                            val started = bleManager.startScan()
-                            infoBanner = if (started) {
-                                "BLE-Suche läuft (8 Sek.)..."
-                            } else {
-                                bleManager.connectionState.value
+                            infoBanner = "Verbindungsart: WLAN (TCP)"
+                        },
+                        label = { Text("WLAN (TCP)") }
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (activeConnMode == "WIFI") {
+                    OutlinedTextField(
+                        value = wifiHostInput,
+                        onValueChange = { wifiHostInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("IP-Adresse oder DynDNS-Host / Pfad") },
+                        placeholder = { Text("z. B. 192.168.1.50 oder mein-node.ddns.net") },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = wifiPortInput,
+                            onValueChange = { raw ->
+                                wifiPortInput = raw.filter { it.isDigit() }.take(5)
+                            },
+                            modifier = Modifier.width(130.dp),
+                            label = { Text("Port") },
+                            placeholder = { Text("5000") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true
+                        )
+                        Button(
+                            onClick = {
+                                val parsedPort = wifiPortInput.trim().toIntOrNull()
+                                if (parsedPort == null || parsedPort !in 1..65535) {
+                                    infoBanner = "Bitte einen gültigen Port (1–65535, Standard 5000) eingeben."
+                                } else if (wifiHostInput.isBlank()) {
+                                    infoBanner = "Bitte eine IP-Adresse oder einen DynDNS-Eintrag eingeben."
+                                } else {
+                                    bleManager.updateWifiEndpoint(wifiHostInput, parsedPort, connectNow = true)
+                                    infoBanner = "WLAN-Ziel gespeichert und Verbindung gestartet."
+                                }
                             }
+                        ) {
+                            Text("Verbinden")
                         }
-                    }) {
-                        Text("BLE suchen")
+                        OutlinedButton(onClick = {
+                            bleManager.sendAdvertNow()
+                            infoBanner = "Gerätesignal (Advert) gesendet."
+                        }) {
+                            Text("Advert")
+                        }
                     }
-                    OutlinedButton(onClick = {
-                        bleManager.sendAdvertNow()
-                        infoBanner = "Gerätesignal (Advert) gesendet."
-                    }) {
-                        Text("Advert senden")
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            if (!checkBlePermissionsGranted()) {
+                                val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                    arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+                                } else {
+                                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                                }
+                                infoBanner = "Bitte Bluetooth-Berechtigungen erteilen..."
+                                requestBlePermissions(perms)
+                            } else {
+                                val started = bleManager.startScan()
+                                infoBanner = if (started) {
+                                    "BLE-Suche läuft (8 Sek.)..."
+                                } else {
+                                    bleManager.connectionState.value
+                                }
+                            }
+                        }) {
+                            Text("BLE suchen")
+                        }
+                        OutlinedButton(onClick = {
+                            bleManager.sendAdvertNow()
+                            infoBanner = "Gerätesignal (Advert) gesendet."
+                        }) {
+                            Text("Advert senden")
+                        }
                     }
                 }
             }
