@@ -12,9 +12,14 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.ParcelUuid
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -96,6 +101,25 @@ class MeshCoreBleManager(private val context: Context) {
         const val APP_VERSION: String = "2.9"
         const val MAX_CHANNELS: Int = 32
         const val MAX_MESSAGES_PER_TARGET: Int = 20
+        const val MAX_TEXT_BYTES: Int = 160
+
+        fun String.takeUtf8Bytes(maxBytes: Int): String {
+            if (maxBytes <= 0 || isEmpty()) return ""
+            val sb = StringBuilder()
+            var bytes = 0
+            var i = 0
+            while (i < length) {
+                val cp = codePointAt(i)
+                val n = String(Character.toChars(cp)).toByteArray(Charsets.UTF_8).size
+                if (bytes + n > maxBytes) break
+                sb.appendCodePoint(cp)
+                bytes += n
+                i += Character.charCount(cp)
+            }
+            return sb.toString()
+        }
+
+        fun String.utf8ByteLength(): Int = toByteArray(Charsets.UTF_8).size
         val DEFAULT_QUICK_REPLIES: List<String> = listOf(
             "Hallo!",
             "Bin gut angekommen!",
@@ -182,6 +206,7 @@ class MeshCoreBleManager(private val context: Context) {
     private data class PendingGroupEcho(
         val msgId: String,
         val channelIndex: Int,
+        val expectedChannelHash: Int?,
         val text: String,
         val createdAtMs: Long
     )
@@ -578,12 +603,80 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    private fun markTargetUnreadAndPlaySound(targetId: String) {
+    private var nextIncomingNotificationId: Int = 2000
+
+    private fun markTargetUnreadAndPlaySound(targetId: String, notificationTitle: String = "", notificationBody: String = "") {
         val updated = _unreadTargetIds.value + targetId
         saveUnreadTargetIds(updated)
         _unreadTargetIds.value = updated
         _incomingAlertCounter.value = _incomingAlertCounter.value + 1L
-        playNewMessageNotificationSound()
+        if (notificationBody.isNotBlank()) {
+            showIncomingMessageNotification(targetId, notificationTitle, notificationBody)
+        } else {
+            playNewMessageNotificationSound()
+        }
+    }
+
+    private fun ensureIncomingMessagesChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channelId = "meshkids_incoming_messages"
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (manager.getNotificationChannel(channelId) == null) {
+                val channel = NotificationChannel(
+                    channelId,
+                    "Neue Nachrichten",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Benachrichtigungen bei neuen Chat-Nachrichten"
+                    enableVibration(true)
+                    setShowBadge(true)
+                }
+                manager.createNotificationChannel(channel)
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun showIncomingMessageNotification(targetId: String, senderTitle: String, messageText: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) return
+        }
+        try {
+            ensureIncomingMessagesChannel()
+            val channelId = "meshkids_incoming_messages"
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("open_target_id", targetId)
+            }
+            val requestCode = (targetId.hashCode() and 0x7FFFFFFF)
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                requestCode,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val title = senderTitle.ifBlank { "Neue Nachricht" }
+            val notifId = 2000 + ((targetId.hashCode() and 0x0FFF))
+            nextIncomingNotificationId = notifId
+
+            val notification = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(title)
+                .setContentText(messageText)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(messageText))
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
+
+            NotificationManagerCompat.from(context).notify(notifId, notification)
+        } catch (_: Exception) {
+        }
     }
 
     private fun playNewMessageNotificationSound() {
@@ -670,15 +763,27 @@ class MeshCoreBleManager(private val context: Context) {
             _isConnected.value = false
             disconnectBleQuietly()
             if (connectNow) {
+                MeshCoreForegroundService.startService(context)
                 connectWifi(_wifiHostOrDyndns.value, _wifiPort.value)
             }
         } else {
             _isConnected.value = false
             disconnectWifiQuietly(cancelReaderJob = true)
             if (connectNow) {
+                MeshCoreForegroundService.startService(context)
                 autoConnectIfSaved()
             }
         }
+    }
+
+    fun disconnect() {
+        manualDisconnect = true
+        isConnecting = false
+        _isConnected.value = false
+        disconnectBleQuietly()
+        disconnectWifiQuietly(cancelReaderJob = true)
+        _connectionState.value = "Getrennt"
+        MeshCoreForegroundService.stopService(context)
     }
 
     private fun disconnectBleQuietly() {
@@ -1390,7 +1495,7 @@ class MeshCoreBleManager(private val context: Context) {
     }
 
     fun sendMessage(target: ChatTarget, text: String) {
-        val cleanText = sanitizeText(text).trim().take(133)
+        val cleanText = sanitizeText(text).trim().takeUtf8Bytes(MAX_TEXT_BYTES)
         if (cleanText.isEmpty()) return
 
         val msgId = UUID.randomUUID().toString()
@@ -1498,9 +1603,11 @@ class MeshCoreBleManager(private val context: Context) {
                     )
                 }
 
+                val expectedChHash = resolveChannelHashForIndex(channel.index)
                 pendingGroupEchoes[msgId] = PendingGroupEcho(
                     msgId = msgId,
                     channelIndex = channel.index,
+                    expectedChannelHash = expectedChHash,
                     text = cleanText,
                     createdAtMs = scheduledAtMs
                 )
@@ -1627,15 +1734,60 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    private fun handleRepeaterRxEcho(frame: ByteArray) {
-        if (pendingGroupEchoes.isEmpty() || frame.size < 6) return
-        val header = frame[3].toInt() and 0xFF
+    private fun computeChannelHashByte(secretBytes: ByteArray): Int? {
+        if (secretBytes.isEmpty() || secretBytes.all { it.toInt() == 0 }) return null
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(secretBytes)
+            digest[0].toInt() and 0xFF
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun resolveChannelHashForIndex(channelIndex: Int): Int? {
+        if (prefs.contains("device_channel_hash_$channelIndex")) {
+            val stored = prefs.getInt("device_channel_hash_$channelIndex", -1)
+            if (stored in 0..255) return stored
+        }
+        return null
+    }
+
+    private fun extractGrpTxtChannelHash(frame: ByteArray): Int? {
+        // PUSH_LOG_RX_DATA layout: [0]=0x88, [1]=snr*4, [2]=rssi, [3..]=raw wire packet
+        if (frame.size < 6) return null
+        val pktStart = 3
+        val header = frame[pktStart].toInt() and 0xFF
+        val routeType = header and 0x03
         val payloadType = (header shr 2) and 0x0F
-        if (payloadType != 0x05) return
+        if (payloadType != 0x05) return null // PAYLOAD_TYPE_GRP_TXT = 5
+
+        // Transport route types (2 or 3) carry a 4-byte transport_codes field after header
+        val hasTransportCodes = (routeType == 0x02 || routeType == 0x03)
+        val pathLenOffset = pktStart + 1 + if (hasTransportCodes) 4 else 0
+        if (frame.size <= pathLenOffset) return null
+
+        val pathLen = frame[pathLenOffset].toInt() and 0xFF
+        if (pathLen > 64) return null
+
+        // GRP_TXT payload begins directly after [path_len (1B)] + [path (pathLen B)]:
+        // payload[0] = channel_hash (1 byte = SHA256(channel_secret)[0])
+        val payloadOffset = pathLenOffset + 1 + pathLen
+        if (frame.size <= payloadOffset) return null
+
+        return frame[payloadOffset].toInt() and 0xFF
+    }
+
+    private fun handleRepeaterRxEcho(frame: ByteArray) {
+        if (pendingGroupEchoes.isEmpty()) return
+        val rxChannelHash = extractGrpTxtChannelHash(frame) ?: return
 
         val nowMs = System.currentTimeMillis()
         val candidate = pendingGroupEchoes.values
-            .filter { (nowMs - it.createdAtMs) in 150L..65_000L }
+            .filter {
+                (nowMs - it.createdAtMs) in 150L..65_000L &&
+                    it.expectedChannelHash != null &&
+                    it.expectedChannelHash == rxChannelHash
+            }
             .minByOrNull { it.createdAtMs } ?: return
 
         pendingGroupEchoes.remove(candidate.msgId)
@@ -1870,21 +2022,27 @@ class MeshCoreBleManager(private val context: Context) {
                         val zeroIdx = nameSlice.indexOf(0.toByte()).let { if (it >= 0) it else nameSlice.size }
                         val rawNameUtf8 = String(nameSlice, 0, zeroIdx, Charsets.UTF_8)
                         val decodedName = sanitizeChannelName(rawNameUtf8)
+                        val pskBytes = if (frame.size >= 50) frame.copyOfRange(34, 50) else ByteArray(16)
                         val hasPsk = if (frame.size >= 50) {
-                            frame.copyOfRange(34, 50).any { it.toInt() != 0 }
+                            pskBytes.any { it.toInt() != 0 }
                         } else {
                             prefs.getBoolean("device_channel_has_psk_$idx", false)
                         }
+                        val channelHashInt = computeChannelHashByte(pskBytes)
 
                         if (decodedName.isNotBlank()) {
                             prefs.edit()
                                 .putString("device_channel_name_$idx", decodedName)
                                 .putBoolean("device_channel_has_psk_$idx", hasPsk)
+                                .remove("device_channel_secret_hex_$idx")
+                                .putInt("device_channel_hash_$idx", channelHashInt ?: -1)
                                 .apply()
                         } else {
                             prefs.edit()
                                 .remove("device_channel_name_$idx")
                                 .remove("device_channel_has_psk_$idx")
+                                .remove("device_channel_secret_hex_$idx")
+                                .remove("device_channel_hash_$idx")
                                 .apply()
                         }
 
@@ -1965,6 +2123,7 @@ class MeshCoreBleManager(private val context: Context) {
 
         val senderDisplay = _contacts.value.firstOrNull { it.pubKeyPrefixHex == prefixHex }?.displayName
         val safeTs = if (msgTimestampMs > 0L) msgTimestampMs else System.currentTimeMillis()
+        val resolvedTitle = senderDisplay?.takeIf { it.isNotBlank() } ?: "Kontakt $prefixHex"
         updateMessages { list ->
             (list + ChatMessage(
                 targetId = prefixHex,
@@ -1975,7 +2134,7 @@ class MeshCoreBleManager(private val context: Context) {
                 timestamp = safeTs
             )).sortedBy { it.timestamp }
         }
-        markTargetUnreadAndPlaySound(prefixHex)
+        markTargetUnreadAndPlaySound(prefixHex, resolvedTitle, text)
     }
 
     private fun addIncomingChannelMessageIfAllowed(channelIndex: Int, rawText: String, msgTimestampMs: Long = System.currentTimeMillis()) {
@@ -1985,6 +2144,9 @@ class MeshCoreBleManager(private val context: Context) {
         val (rawSender, sender, body) = resolveGroupSenderAndBody(rawText)
         val targetId = "ch_$channelIndex"
         val safeTs = if (msgTimestampMs > 0L) msgTimestampMs else System.currentTimeMillis()
+        val channelTitle = _channels.value.firstOrNull { it.index == channelIndex }?.displayName
+            ?: "Kanal $channelIndex"
+        val notifTitle = if (!sender.isNullOrBlank()) "$channelTitle · $sender" else channelTitle
         updateMessages { list ->
             (list + ChatMessage(
                 targetId = targetId,
@@ -1996,7 +2158,7 @@ class MeshCoreBleManager(private val context: Context) {
                 timestamp = safeTs
             )).sortedBy { it.timestamp }
         }
-        markTargetUnreadAndPlaySound(targetId)
+        markTargetUnreadAndPlaySound(targetId, notifTitle, body)
     }
 
     fun toggleContactAllowed(prefixHex: String, allowed: Boolean) {

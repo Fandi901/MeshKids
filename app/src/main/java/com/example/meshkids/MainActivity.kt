@@ -53,11 +53,14 @@ import kotlinx.coroutines.delay
 class MainActivity : ComponentActivity() {
     private lateinit var bleManager: MeshCoreBleManager
     private lateinit var pinManager: ParentPinManager
+    private val pendingOpenTargetId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        bleManager = MeshCoreBleManager(this)
+        bleManager = MeshCoreForegroundService.getOrCreateSharedManager(applicationContext)
         pinManager = ParentPinManager(this)
+        MeshCoreForegroundService.startService(applicationContext)
+        consumeOpenTargetIntent(intent)
 
         setContent {
             MaterialTheme(
@@ -67,15 +70,33 @@ class MainActivity : ComponentActivity() {
                     background = Color(0xFFF4F8FB)
                 )
             ) {
-                MeshKidsApp(bleManager, pinManager)
+                MeshKidsApp(bleManager, pinManager, pendingOpenTargetId)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeOpenTargetIntent(intent)
+    }
+
+    private fun consumeOpenTargetIntent(srcIntent: Intent?) {
+        val targetId = srcIntent?.getStringExtra("open_target_id")?.trim()
+        if (!targetId.isNullOrEmpty()) {
+            pendingOpenTargetId.value = targetId
+            srcIntent.removeExtra("open_target_id")
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
+fun MeshKidsApp(
+    bleManager: MeshCoreBleManager,
+    pinManager: ParentPinManager,
+    pendingOpenTargetId: kotlinx.coroutines.flow.StateFlow<String?> = kotlinx.coroutines.flow.MutableStateFlow(null)
+) {
     val lifecycleOwner = LocalLifecycleOwner.current
     var permissionsGranted by remember { mutableStateOf(false) }
 
@@ -102,21 +123,31 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
     ) { _ ->
         val allOk = checkBlePermissionsGranted()
         permissionsGranted = allOk
+        MeshCoreForegroundService.startService(bleManager.appContext)
         if (allOk) {
             bleManager.autoConnectIfSaved()
         }
     }
 
     LaunchedEffect(Unit) {
-        val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-        if (checkBlePermissionsGranted()) {
-            permissionsGranted = true
+        val perms = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_SCAN)
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+            } else {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }.toTypedArray()
+
+        permissionsGranted = checkBlePermissionsGranted()
+        MeshCoreForegroundService.startService(bleManager.appContext)
+        if (permissionsGranted) {
             bleManager.autoConnectIfSaved()
-        } else {
+        }
+        if (perms.isNotEmpty()) {
             permissionLauncher.launch(perms)
         }
     }
@@ -173,7 +204,17 @@ fun MeshKidsApp(bleManager: MeshCoreBleManager, pinManager: ParentPinManager) {
 
     val quickReplies by bleManager.quickReplies.collectAsState()
 
+    val requestedTargetId by pendingOpenTargetId.collectAsState()
     var selectedTargetId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(requestedTargetId, allowedTargets) {
+        val reqId = requestedTargetId
+        if (!reqId.isNullOrEmpty() && allowedTargets.any { it.id == reqId }) {
+            selectedTargetId = reqId
+            if (pendingOpenTargetId is kotlinx.coroutines.flow.MutableStateFlow<String?>) {
+                pendingOpenTargetId.value = null
+            }
+        }
+    }
     val selectedTarget = remember(selectedTargetId, allowedTargets) {
         allowedTargets.firstOrNull { it.id == selectedTargetId }
     }
@@ -568,7 +609,7 @@ fun KidChatScreen(
                     Spacer(modifier = Modifier.height(10.dp))
                     OutlinedTextField(
                         value = replyDraftText,
-                        onValueChange = { if (it.length <= 133) replyDraftText = it },
+                        onValueChange = { if (it.toByteArray(Charsets.UTF_8).size <= MeshCoreBleManager.MAX_TEXT_BYTES) replyDraftText = it },
                         modifier = Modifier.fillMaxWidth(),
                         placeholder = { Text("$displayAliasName: ...") },
                         singleLine = true
@@ -602,7 +643,11 @@ fun KidChatScreen(
                             else -> body
                         }
                         if (body.isNotBlank()) {
-                            val fullMsg = "@[$meshCoreNodeName] $body".take(133)
+                            val prefixText = "@[$meshCoreNodeName] "
+                            val prefixBytes = prefixText.toByteArray(Charsets.UTF_8).size
+                            val maxBodyBytes = (MeshCoreBleManager.MAX_TEXT_BYTES - prefixBytes).coerceAtLeast(0)
+                            val safeBody = with(MeshCoreBleManager) { body.takeUtf8Bytes(maxBodyBytes) }
+                            val fullMsg = (prefixText + safeBody).let { with(MeshCoreBleManager) { it.takeUtf8Bytes(MAX_TEXT_BYTES) } }
                             onSendMessage(fullMsg)
                             replyTargetMsg = null
                             replyDraftText = ""
@@ -681,7 +726,7 @@ fun KidChatScreen(
                 val canReplyInGroup = !msg.isFromMe && target.type == ChatTargetType.CHANNEL
 
                 val statusLabel = when {
-                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> "Vom Repeater gehört"
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> "Mesh aktiv"
                     msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> "Sende / warte auf Repeater..."
                     isGroupMsg -> "Gesendet (Gruppe)"
                     msg.deliveryStatus == DeliveryStatus.DELIVERED -> "Zugestellt"
@@ -801,7 +846,7 @@ fun KidChatScreen(
         ) {
             OutlinedTextField(
                 value = inputText,
-                onValueChange = { if (it.length <= 133) inputText = it },
+                onValueChange = { if (it.toByteArray(Charsets.UTF_8).size <= MeshCoreBleManager.MAX_TEXT_BYTES) inputText = it },
                 modifier = Modifier.weight(1f),
                 placeholder = { Text("Nachricht an ${target.title}...") },
                 shape = RoundedCornerShape(24.dp),
@@ -1233,6 +1278,13 @@ fun ParentSettingsScreen(
                             Text("Advert")
                         }
                     }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(onClick = {
+                        bleManager.disconnect()
+                        infoBanner = "Verbindung getrennt und Hintergrunddienst beendet."
+                    }) {
+                        Text("Trennen")
+                    }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = {
@@ -1261,6 +1313,13 @@ fun ParentSettingsScreen(
                         }) {
                             Text("Advert senden")
                         }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(onClick = {
+                        bleManager.disconnect()
+                        infoBanner = "Verbindung getrennt und Hintergrunddienst beendet."
+                    }) {
+                        Text("Trennen")
                     }
                 }
             }
