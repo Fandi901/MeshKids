@@ -1810,8 +1810,13 @@ class MeshCoreBleManager(private val context: Context) {
                 handleRepeaterRxEcho(frame)
             }
             RESP_SELF_INFO -> {
+                // MeshCore RESP_SELF_INFO layout:
+                // [0]=0x05, [1]=adv_type, [2]=tx_power, [3]=max_tx_power,
+                // [4..35]=32-byte pub_key, [36..39]=lat, [40..43]=lon,
+                // [44..47]=multi_ack, [48]=adv_loc_policy, [49..51]=extra/reserved, [52..]=node_name
                 if (frame.size > 49) {
-                    val nameBytes = frame.copyOfRange(49, frame.size)
+                    val startOffset = if (frame.size > 52) 52 else 49
+                    val nameBytes = frame.copyOfRange(startOffset, frame.size)
                     val decoded = decodeCleanUtf8(nameBytes).take(31)
                     if (decoded.isNotBlank()) {
                         prefs.edit().putString("device_node_name", decoded).apply()
