@@ -850,7 +850,7 @@ fun ParentPinDialog(
                 OutlinedTextField(
                     value = enteredPin,
                     onValueChange = { raw ->
-                        enteredPin = raw.filter { it.isDigit() }.take(12)
+                        enteredPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
                         error = false
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -948,6 +948,7 @@ fun ParentSettingsScreen(
     var manualAliasName by remember { mutableStateOf("") }
     var kidName by remember { mutableStateOf("") }
     var newPin by remember { mutableStateOf("") }
+    var confirmNewPin by remember { mutableStateOf("") }
     var scopePopupChannel by remember { mutableStateOf<MeshChannel?>(null) }
 
     var infoBanner by remember { mutableStateOf<String?>(null) }
@@ -1797,25 +1798,53 @@ fun ParentSettingsScreen(
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("5. Admin-PIN ändern", fontWeight = FontWeight.Bold)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = newPin,
-                        onValueChange = { newPin = it },
-                        modifier = Modifier.weight(1f),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                        placeholder = { Text("Neue PIN (min. 4 Ziffern)") },
-                        singleLine = true
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(onClick = {
-                        if (newPin.length >= 4) {
-                            pinManager.setPin(newPin)
-                            newPin = ""
-                            infoBanner = "Admin-PIN wurde geändert."
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = newPin,
+                    onValueChange = { raw ->
+                        newPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    label = { Text("Neue PIN (4–12 Ziffern)") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = confirmNewPin,
+                    onValueChange = { raw ->
+                        confirmNewPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    label = { Text("Neue PIN wiederholen") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        when {
+                            !ParentPinManager.isValidPin(newPin) -> {
+                                infoBanner = "Fehler: Die PIN muss aus 4–12 Ziffern (0–9) bestehen."
+                            }
+                            newPin != confirmNewPin -> {
+                                infoBanner = "Fehler: Die beiden PIN-Eingaben stimmen nicht überein."
+                            }
+                            pinManager.setPin(newPin) -> {
+                                newPin = ""
+                                confirmNewPin = ""
+                                infoBanner = "Admin-PIN wurde geändert."
+                            }
+                            else -> {
+                                infoBanner = "Fehler: Admin-PIN konnte nicht gespeichert werden."
+                            }
                         }
-                    }) {
-                        Text("PIN setzen")
-                    }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("PIN setzen")
                 }
             }
 
