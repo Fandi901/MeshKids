@@ -146,8 +146,14 @@ class MeshCoreBleManager(private val context: Context) {
         const val PUSH_SEND_CONFIRMED: Byte = 0x82.toByte()
         const val PUSH_MSG_WAITING: Byte = 0x83.toByte()
         const val PUSH_LOG_RX_DATA: Byte = 0x88.toByte()
+        const val RESP_SELF_INFO: Byte = 0x05
         const val DEFAULT_WIFI_PORT: Int = 5000
         const val WIFI_CONNECT_TIMEOUT_MS: Int = 4000
+        const val WIFI_KEEPALIVE_INTERVAL_MS: Long = 35_000L
+        const val WIFI_READ_TIMEOUT_MS: Int = 80_000
+        const val WIFI_FRAME_TO_DEVICE: Byte = 0x3C.toByte()   // '<'
+        const val WIFI_FRAME_FROM_DEVICE: Byte = 0x3E.toByte() // '>'
+        const val WIFI_MAX_FRAME_LEN: Int = 4096
     }
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -272,10 +278,16 @@ class MeshCoreBleManager(private val context: Context) {
     private val _wifiPort = MutableStateFlow(prefs.getInt("wifi_port", DEFAULT_WIFI_PORT).takeIf { it in 1..65535 } ?: DEFAULT_WIFI_PORT)
     val wifiPort: StateFlow<Int> = _wifiPort
 
+    private val _deviceNodeName = MutableStateFlow(prefs.getString("device_node_name", "") ?: "")
+    val deviceNodeName: StateFlow<String> = _deviceNodeName
+
     private var wifiSocket: java.net.Socket? = null
     private var wifiOut: java.io.OutputStream? = null
     private var wifiReaderJob: Job? = null
+    private var wifiKeepaliveJob: Job? = null
     private var wifiConnecting: Boolean = false
+    @Volatile
+    private var lastWifiRxAtMs: Long = 0L
 
     private var activeMediaPlayer: MediaPlayer? = null
 
@@ -648,7 +660,7 @@ class MeshCoreBleManager(private val context: Context) {
                 connectWifi(_wifiHostOrDyndns.value, _wifiPort.value)
             }
         } else {
-            disconnectWifiQuietly()
+            disconnectWifiQuietly(cancelReaderJob = true)
             if (connectNow) {
                 autoConnectIfSaved()
             }
@@ -669,9 +681,7 @@ class MeshCoreBleManager(private val context: Context) {
         awaitingCommandAck = false
     }
 
-    private fun disconnectWifiQuietly() {
-        wifiReaderJob?.cancel()
-        wifiReaderJob = null
+    private fun closeWifiSocketAndStreams() {
         try {
             wifiOut?.close()
         } catch (_: Exception) {
@@ -685,6 +695,38 @@ class MeshCoreBleManager(private val context: Context) {
         wifiConnecting = false
         isWriting = false
         awaitingCommandAck = false
+        commandQueue.clear()
+    }
+
+    private fun disconnectWifiQuietly(cancelReaderJob: Boolean = false) {
+        wifiKeepaliveJob?.cancel()
+        wifiKeepaliveJob = null
+        if (cancelReaderJob) {
+            wifiReaderJob?.cancel()
+            wifiReaderJob = null
+        }
+        closeWifiSocketAndStreams()
+    }
+
+    private fun startWifiKeepalive(socket: java.net.Socket) {
+        wifiKeepaliveJob?.cancel()
+        wifiKeepaliveJob = scope.launch {
+            while (isActive && !socket.isClosed && socket.isConnected && _isConnected.value) {
+                delay(WIFI_KEEPALIVE_INTERVAL_MS)
+                if (!isActive || socket.isClosed || !socket.isConnected || !_isConnected.value) break
+                val silenceMs = System.currentTimeMillis() - lastWifiRxAtMs
+                if (silenceMs > WIFI_READ_TIMEOUT_MS.toLong()) {
+                    closeWifiSocketAndStreams()
+                    break
+                }
+                val epochSec = (System.currentTimeMillis() / 1000L).toInt()
+                val keepaliveCmd = ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN)
+                    .put(CMD_SET_DEVICE_TIME)
+                    .putInt(epochSec)
+                    .array()
+                enqueueCommand(keepaliveCmd)
+            }
+        }
     }
 
     fun connectWifi(hostOrDyndns: String = _wifiHostOrDyndns.value, port: Int = _wifiPort.value) {
@@ -692,41 +734,47 @@ class MeshCoreBleManager(private val context: Context) {
         val safePort = if (port in 1..65535) port else DEFAULT_WIFI_PORT
         if (targetHost.isEmpty()) {
             _isConnected.value = false
-            _connectionState.value = "WLAN: IP oder DynDNS fehlt"
+            _connectionState.value = "WLAN: IP-Adresse oder Hostname fehlt"
             return
         }
         if (wifiConnecting) return
 
         manualDisconnect = false
+        disconnectWifiQuietly(cancelReaderJob = true)
         wifiConnecting = true
         _isConnected.value = false
         _connectionState.value = "WLAN verbinde ($targetHost:$safePort)..."
 
-        wifiReaderJob?.cancel()
         wifiReaderJob = scope.launch {
+            var socket: java.net.Socket? = null
             try {
-                disconnectWifiQuietly()
-                wifiConnecting = true
-                val socket = java.net.Socket()
+                val newSocket = java.net.Socket()
+                socket = newSocket
                 val address = java.net.InetSocketAddress(targetHost, safePort)
-                socket.connect(address, WIFI_CONNECT_TIMEOUT_MS)
-                socket.soTimeout = 0
-                socket.tcpNoDelay = true
+                newSocket.connect(address, WIFI_CONNECT_TIMEOUT_MS)
+                newSocket.keepAlive = true
+                newSocket.soTimeout = WIFI_READ_TIMEOUT_MS
+                newSocket.tcpNoDelay = true
 
-                val outStream = socket.getOutputStream()
-                val inStream = socket.getInputStream()
+                val outStream = newSocket.getOutputStream()
+                val inStream = newSocket.getInputStream()
 
-                wifiSocket = socket
+                wifiSocket = newSocket
                 wifiOut = outStream
                 wifiConnecting = false
+                lastWifiRxAtMs = System.currentTimeMillis()
                 _isConnected.value = true
                 _connectionState.value = "WLAN verbunden ($targetHost:$safePort)"
                 initializeMeshCoreSession()
+                startWifiKeepalive(newSocket)
 
-                val buffer = ByteArray(1024)
-                while (isActive && !socket.isClosed && socket.isConnected) {
+                val rxBuffer = java.io.ByteArrayOutputStream()
+                val readChunk = ByteArray(1024)
+                while (isActive && !newSocket.isClosed && newSocket.isConnected) {
                     val readCount = try {
-                        inStream.read(buffer)
+                        inStream.read(readChunk)
+                    } catch (_: java.net.SocketTimeoutException) {
+                        -1
                     } catch (_: java.net.SocketException) {
                         -1
                     } catch (_: java.io.IOException) {
@@ -735,13 +783,51 @@ class MeshCoreBleManager(private val context: Context) {
                     if (readCount <= 0) {
                         break
                     }
-                    val frame = buffer.copyOfRange(0, readCount)
-                    handleIncomingFrame(frame)
+                    lastWifiRxAtMs = System.currentTimeMillis()
+                    rxBuffer.write(readChunk, 0, readCount)
+
+                    // Parse MeshCore TCP frames: '>' (0x3E) + uint16 LE length + payload
+                    val accumulated = rxBuffer.toByteArray()
+                    var offset = 0
+                    while (offset < accumulated.size) {
+                        while (offset < accumulated.size && accumulated[offset] != WIFI_FRAME_FROM_DEVICE) {
+                            offset++
+                        }
+                        if (offset + 3 > accumulated.size) {
+                            break
+                        }
+                        val payloadLen = (accumulated[offset + 1].toInt() and 0xFF) or
+                            ((accumulated[offset + 2].toInt() and 0xFF) shl 8)
+                        if (payloadLen <= 0 || payloadLen > WIFI_MAX_FRAME_LEN) {
+                            offset++
+                            continue
+                        }
+                        if (offset + 3 + payloadLen > accumulated.size) {
+                            break
+                        }
+                        val payload = accumulated.copyOfRange(offset + 3, offset + 3 + payloadLen)
+                        offset += 3 + payloadLen
+                        handleIncomingFrame(payload)
+                    }
+                    if (offset > 0) {
+                        rxBuffer.reset()
+                        if (offset < accumulated.size) {
+                            rxBuffer.write(accumulated, offset, accumulated.size - offset)
+                        }
+                    }
                 }
             } catch (_: Exception) {
             } finally {
                 val wasManual = manualDisconnect
-                disconnectWifiQuietly()
+                wifiKeepaliveJob?.cancel()
+                wifiKeepaliveJob = null
+                try {
+                    socket?.close()
+                } catch (_: Exception) {
+                }
+                if (wifiSocket === socket || socket == null) {
+                    closeWifiSocketAndStreams()
+                }
                 if (_connectionMode.value == "WIFI") {
                     _isConnected.value = false
                     _connectionState.value = if (wasManual) "Getrennt" else "WLAN getrennt – verbinde neu..."
@@ -1265,14 +1351,26 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
+    fun requestDeviceNodeName() {
+        val appStart = ByteBuffer.allocate(8).apply {
+            put(CMD_APP_START)
+            put(0x08)
+            put(ByteArray(6))
+        }.array()
+        enqueueCommand(appStart)
+    }
+
     fun setKidNodeName(name: String) {
         val cleanName = sanitizeText(name).take(31)
         if (cleanName.isEmpty()) return
+        prefs.edit().putString("device_node_name", cleanName).apply()
+        _deviceNodeName.value = cleanName
         val nameBytes = cleanName.toByteArray(Charsets.UTF_8)
         val cmd = ByteArray(1 + nameBytes.size)
         cmd[0] = CMD_SET_ADVERT_NAME
         System.arraycopy(nameBytes, 0, cmd, 1, nameBytes.size)
         enqueueCommand(cmd)
+        requestDeviceNodeName()
     }
 
     fun sendMessage(target: ChatTarget, text: String) {
@@ -1567,7 +1665,12 @@ class MeshCoreBleManager(private val context: Context) {
             awaitingCommandAck = false
             scope.launch {
                 try {
-                    out.write(next)
+                    val framed = ByteArray(3 + next.size)
+                    framed[0] = WIFI_FRAME_TO_DEVICE
+                    framed[1] = (next.size and 0xFF).toByte()
+                    framed[2] = ((next.size shr 8) and 0xFF).toByte()
+                    System.arraycopy(next, 0, framed, 3, next.size)
+                    out.write(framed)
                     out.flush()
                     isWriting = false
                     val postWriteDelay = if (next.isNotEmpty() && next[0] == CMD_SET_FLOOD_SCOPE) {
@@ -1579,8 +1682,7 @@ class MeshCoreBleManager(private val context: Context) {
                     processNextCommand()
                 } catch (_: Exception) {
                     isWriting = false
-                    commandQueue.addFirst(next)
-                    disconnectWifiQuietly()
+                    closeWifiSocketAndStreams()
                     _isConnected.value = false
                     _connectionState.value = "WLAN getrennt – verbinde neu..."
                 }
@@ -1706,6 +1808,16 @@ class MeshCoreBleManager(private val context: Context) {
             }
             PUSH_LOG_RX_DATA -> {
                 handleRepeaterRxEcho(frame)
+            }
+            RESP_SELF_INFO -> {
+                if (frame.size > 49) {
+                    val nameBytes = frame.copyOfRange(49, frame.size)
+                    val decoded = decodeCleanUtf8(nameBytes).take(31)
+                    if (decoded.isNotBlank()) {
+                        prefs.edit().putString("device_node_name", decoded).apply()
+                        _deviceNodeName.value = decoded
+                    }
+                }
             }
             RESP_CONTACT -> {
                 if (frame.size >= 132) {

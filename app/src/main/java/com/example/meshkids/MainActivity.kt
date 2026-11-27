@@ -946,7 +946,16 @@ fun ParentSettingsScreen(
     val manualGroupAliases by bleManager.manualGroupAliases.collectAsState()
     var manualChatName by remember { mutableStateOf("") }
     var manualAliasName by remember { mutableStateOf("") }
-    var kidName by remember { mutableStateOf("") }
+    val deviceNodeName by bleManager.deviceNodeName.collectAsState()
+    var kidName by remember { mutableStateOf(deviceNodeName) }
+    var userEditedKidName by remember { mutableStateOf(false) }
+
+    LaunchedEffect(deviceNodeName) {
+        if (deviceNodeName.isNotBlank() && (!userEditedKidName || kidName.isBlank())) {
+            kidName = deviceNodeName
+            userEditedKidName = false
+        }
+    }
     var newPin by remember { mutableStateOf("") }
     var confirmNewPin by remember { mutableStateOf("") }
     var pinErrorPopupMessage by remember { mutableStateOf<String?>(null) }
@@ -1176,9 +1185,15 @@ fun ParentSettingsScreen(
                         value = wifiHostInput,
                         onValueChange = { wifiHostInput = it },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("IP-Adresse oder DynDNS-Host / Pfad") },
-                        placeholder = { Text("z. B. 192.168.1.50 oder mein-node.ddns.net") },
+                        label = { Text("Lokale IP-Adresse oder Hostname") },
+                        placeholder = { Text("z. B. 192.168.178.50 oder meshcore.local") },
                         singleLine = true
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Sicherheitshinweis: Bitte nur im lokalen Heimnetz verwenden und Port 5000 nicht per Portweiterleitung öffnen (keine Verschlüsselung/Anmeldung). Für unterwegs ein VPN (z. B. WireGuard oder Tailscale) nutzen.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(
@@ -1202,7 +1217,7 @@ fun ParentSettingsScreen(
                                 if (parsedPort == null || parsedPort !in 1..65535) {
                                     infoBanner = "Bitte einen gültigen Port (1–65535, Standard 5000) eingeben."
                                 } else if (wifiHostInput.isBlank()) {
-                                    infoBanner = "Bitte eine IP-Adresse oder einen DynDNS-Eintrag eingeben."
+                                    infoBanner = "Bitte eine lokale IP-Adresse oder einen Hostnamen eingeben."
                                 } else {
                                     bleManager.updateWifiEndpoint(wifiHostInput, parsedPort, connectNow = true)
                                     infoBanner = "WLAN-Ziel gespeichert und Verbindung gestartet."
@@ -1808,10 +1823,23 @@ fun ParentSettingsScreen(
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(8.dp))
                 Text("4. Anzeigename des Kindes im Mesh", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (deviceNodeName.isNotBlank()) {
+                        "Aktueller Node-Name im Gerät: $deviceNodeName"
+                    } else {
+                        "Aktueller Node-Name im Gerät: wird bei Verbindung ausgelesen..."
+                    },
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
                         value = kidName,
-                        onValueChange = { kidName = it },
+                        onValueChange = {
+                            kidName = it
+                            userEditedKidName = true
+                        },
                         modifier = Modifier.weight(1f),
                         placeholder = { Text("z. B. Leo") },
                         singleLine = true
@@ -1820,6 +1848,7 @@ fun ParentSettingsScreen(
                     Button(onClick = {
                         if (kidName.isNotBlank()) {
                             bleManager.setKidNodeName(kidName)
+                            userEditedKidName = false
                             infoBanner = "Gerätename '$kidName' gesetzt."
                         }
                     }) {
