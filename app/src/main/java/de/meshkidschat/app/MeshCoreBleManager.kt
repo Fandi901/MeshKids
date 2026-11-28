@@ -860,6 +860,7 @@ class MeshCoreBleManager(private val context: Context) {
 
         manualDisconnect = false
         disconnectWifiQuietly(cancelReaderJob = true)
+        prepareForNodeSwitch("WIFI:${targetHost.lowercase()}:$safePort")
         wifiConnecting = true
         _isConnected.value = false
         _connectionState.value = "WLAN verbinde ($targetHost:$safePort)..."
@@ -1166,6 +1167,7 @@ class MeshCoreBleManager(private val context: Context) {
         connectAttemptStartedAtMs = System.currentTimeMillis()
         _connectionState.value = "Verbinde..."
         prefs.edit().putString("saved_mac", device.address).apply()
+        prepareForNodeSwitch("BLE:${device.address.uppercase()}")
         scope.launch(Dispatchers.Main) {
             try {
                 bluetoothGatt?.close()
@@ -1294,6 +1296,27 @@ class MeshCoreBleManager(private val context: Context) {
                 handleIncomingFrame(characteristic.value)
             }
         }
+    }
+
+    private fun prepareForNodeSwitch(newNodeKey: String) {
+        val previousNode = lastConnectedNodeKey
+        if (previousNode != null && previousNode != newNodeKey) {
+            _contacts.value = emptyList()
+            saveCachedContacts(emptyList())
+            _channels.value = (0 until MAX_CHANNELS).map { idx ->
+                val savedAlias = prefs.getString("channel_alias_$idx", "") ?: ""
+                val savedAllowed = prefs.getBoolean("channel_allowed_$idx", false)
+                val savedScope = prefs.getString("channel_scope_$idx", "") ?: ""
+                MeshChannel(
+                    index = idx,
+                    originalName = "Kanal $idx",
+                    aliasName = savedAlias,
+                    isAllowedForKid = savedAllowed,
+                    regionScope = savedScope
+                )
+            }
+        }
+        lastConnectedNodeKey = newNodeKey
     }
 
     private fun initializeMeshCoreSession() {
@@ -1605,43 +1628,21 @@ class MeshCoreBleManager(private val context: Context) {
                             delay(initialPacingDelayMs)
                         }
                         val usedScopedFlood = channel.regionScope.isNotBlank()
-                        val firstEpochSec = (System.currentTimeMillis() / 1000L).toInt()
+                        val txEpochSec = (System.currentTimeMillis() / 1000L).toInt()
                         if (usedScopedFlood) {
                             enqueueCommand(buildFloodScopePacket(channel.regionScope))
                         }
-                        enqueueCommand(buildChannelPacket(firstEpochSec))
+                        enqueueCommand(buildChannelPacket(txEpochSec))
                         if (usedScopedFlood) {
                             enqueueCommand(buildFloodScopePacket(""))
                         }
 
-                        delay(GROUP_REPEATER_WAIT_MS)
-                        val stillWaiting = _messages.value.firstOrNull {
-                            it.id == msgId && it.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER
-                        }
-                        if (stillWaiting != null) {
-                            val retryNowMs = System.currentTimeMillis()
-                            val retrySchedMs = maxOf(retryNowMs, lastChannelTxScheduledAtMs + CHANNEL_SEND_MIN_SPACING_MS)
-                            val retryWaitMs = (retrySchedMs - retryNowMs).coerceAtLeast(0L)
-                            lastChannelTxScheduledAtMs = retrySchedMs
-                            if (retryWaitMs > 0L) {
-                                delay(retryWaitMs)
-                            }
-                            val secondEpochSec = (System.currentTimeMillis() / 1000L).toInt()
-                            if (usedScopedFlood) {
-                                enqueueCommand(buildFloodScopePacket(channel.regionScope))
-                            }
-                            enqueueCommand(buildChannelPacket(secondEpochSec))
-                            if (usedScopedFlood) {
-                                enqueueCommand(buildFloodScopePacket(""))
-                            }
-
-                            delay(GROUP_REPEATER_WAIT_MS)
-                            updateMessages { list ->
-                                list.map { m ->
-                                    if (m.id == msgId && m.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER) {
-                                        m.copy(deliveryStatus = DeliveryStatus.GROUP_SENT)
-                                    } else m
-                                }
+                        delay(6_000L)
+                        updateMessages { list ->
+                            list.map { m ->
+                                if (m.id == msgId && m.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER) {
+                                    m.copy(deliveryStatus = DeliveryStatus.GROUP_SENT)
+                                } else m
                             }
                         }
                     } finally {
@@ -1656,6 +1657,9 @@ class MeshCoreBleManager(private val context: Context) {
             }
         }
     }
+
+    @Volatile
+    private var lastConnectedNodeKey: String? = null
 
     @Volatile
     private var lastSentDirectMsgId: String? = null
@@ -1946,8 +1950,15 @@ class MeshCoreBleManager(private val context: Context) {
                     val nameBytes = frame.copyOfRange(53, frame.size)
                     val decoded = decodeCleanUtf8(nameBytes).take(31)
                     if (decoded.isNotBlank()) {
+                        val previousName = _deviceNodeName.value
                         prefs.edit().putString("device_node_name", decoded).apply()
                         _deviceNodeName.value = decoded
+                        if (previousName != null && previousName.isNotBlank() && previousName != decoded) {
+                            _contacts.value = emptyList()
+                            saveCachedContacts(emptyList())
+                            syncContacts()
+                            syncChannelsFromDevice()
+                        }
                     }
                 }
             }

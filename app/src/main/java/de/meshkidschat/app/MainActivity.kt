@@ -268,7 +268,7 @@ fun MeshKidsApp(
     }
 
     Scaffold(
-        modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
+        modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding(),
         topBar = {
             TopAppBar(
                 title = {
@@ -671,7 +671,7 @@ fun KidChatScreen(
         )
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(modifier = Modifier.fillMaxSize().imePadding()) {
         if (target.type == ChatTargetType.CHANNEL) {
             Surface(
                 color = Color(0xFFE3F2FD),
