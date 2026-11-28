@@ -1,0 +1,2119 @@
+package de.meshkidschat.app
+
+import android.Manifest
+import android.os.Build
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.delay
+
+class MainActivity : ComponentActivity() {
+    private lateinit var bleManager: MeshCoreBleManager
+    private lateinit var pinManager: ParentPinManager
+    private val pendingOpenTargetId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+        bleManager = MeshCoreForegroundService.getOrCreateSharedManager(applicationContext)
+        pinManager = ParentPinManager(this)
+        MeshCoreForegroundService.startService(applicationContext)
+        consumeOpenTargetIntent(intent)
+
+        setContent {
+            MaterialTheme(
+                colorScheme = lightColorScheme(
+                    primary = Color(0xFF1E88E5),
+                    secondary = Color(0xFF2E7D32),
+                    background = Color(0xFFF4F8FB)
+                )
+            ) {
+                MeshKidsApp(bleManager, pinManager, pendingOpenTargetId)
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeOpenTargetIntent(intent)
+    }
+
+    private fun consumeOpenTargetIntent(srcIntent: Intent?) {
+        val targetId = srcIntent?.getStringExtra("open_target_id")?.trim()
+        if (!targetId.isNullOrEmpty()) {
+            pendingOpenTargetId.value = targetId
+            srcIntent.removeExtra("open_target_id")
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MeshKidsApp(
+    bleManager: MeshCoreBleManager,
+    pinManager: ParentPinManager,
+    pendingOpenTargetId: kotlinx.coroutines.flow.StateFlow<String?> = kotlinx.coroutines.flow.MutableStateFlow(null)
+) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var permissionsGranted by remember { mutableStateOf(false) }
+
+    fun checkBlePermissionsGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                bleManager.appContext,
+                Manifest.permission.BLUETOOTH_SCAN
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED &&
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    bleManager.appContext,
+                    Manifest.permission.BLUETOOTH_CONNECT
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                bleManager.appContext,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        val allOk = checkBlePermissionsGranted()
+        permissionsGranted = allOk
+        MeshCoreForegroundService.startService(bleManager.appContext)
+        if (allOk) {
+            bleManager.autoConnectIfSaved()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val perms = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_SCAN)
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+            } else {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }.toTypedArray()
+
+        permissionsGranted = checkBlePermissionsGranted()
+        MeshCoreForegroundService.startService(bleManager.appContext)
+        if (permissionsGranted) {
+            bleManager.autoConnectIfSaved()
+        }
+        if (perms.isNotEmpty()) {
+            permissionLauncher.launch(perms)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, permissionsGranted) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && permissionsGranted) {
+                bleManager.autoConnectIfSaved()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val isConnected by bleManager.isConnected.collectAsState()
+    val connectionState by bleManager.connectionState.collectAsState()
+    val allContacts by bleManager.contacts.collectAsState()
+    val allChannels by bleManager.channels.collectAsState()
+    val unreadTargetIds by bleManager.unreadTargetIds.collectAsState()
+    val alertCounter by bleManager.incomingAlertCounter.collectAsState()
+    val messages by bleManager.messages.collectAsState()
+
+    val allowedTargets = remember(allContacts, allChannels, messages, unreadTargetIds) {
+        val channelTargets = allChannels.filter { it.isAllowedForKid }.map {
+            ChatTarget(
+                type = ChatTargetType.CHANNEL,
+                id = "ch_${it.index}",
+                title = it.displayName,
+                channel = it
+            )
+        }
+        val contactTargets = allContacts.filter { it.isAllowedForKid }.map {
+            ChatTarget(
+                type = ChatTargetType.CONTACT,
+                id = it.pubKeyPrefixHex,
+                title = it.displayName,
+                contact = it
+            )
+        }
+        val latestTsByTarget = mutableMapOf<String, Long>()
+        for (m in messages) {
+            val prev = latestTsByTarget[m.targetId]
+            if (prev == null || m.timestamp > prev) {
+                latestTsByTarget[m.targetId] = m.timestamp
+            }
+        }
+        (channelTargets + contactTargets).sortedWith(
+            compareByDescending<ChatTarget> { unreadTargetIds.contains(it.id) }
+                .thenByDescending { latestTsByTarget[it.id] ?: 0L }
+        )
+    }
+
+    val quickReplies by bleManager.quickReplies.collectAsState()
+
+    val requestedTargetId by pendingOpenTargetId.collectAsState()
+    var selectedTargetId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(requestedTargetId, allowedTargets) {
+        val reqId = requestedTargetId
+        if (!reqId.isNullOrEmpty() && allowedTargets.any { it.id == reqId }) {
+            selectedTargetId = reqId
+            if (pendingOpenTargetId is kotlinx.coroutines.flow.MutableStateFlow<String?>) {
+                pendingOpenTargetId.value = null
+            }
+        }
+    }
+    val selectedTarget = remember(selectedTargetId, allowedTargets) {
+        allowedTargets.firstOrNull { it.id == selectedTargetId }
+    }
+
+    LaunchedEffect(selectedTarget?.id) {
+        selectedTarget?.let { target ->
+            bleManager.markTargetRead(target.id)
+            val channelScope = target.channel?.regionScope?.trim().orEmpty()
+            if (target.type == ChatTargetType.CHANNEL && channelScope.isNotEmpty()) {
+                bleManager.applyChannelFloodScope(channelScope)
+            }
+        }
+    }
+
+    var showPinDialog by remember { mutableStateOf(false) }
+    var showParentSettings by remember { mutableStateOf(false) }
+
+    BackHandler(enabled = showParentSettings || showPinDialog || selectedTargetId != null) {
+        when {
+            showParentSettings -> showParentSettings = false
+            showPinDialog -> showPinDialog = false
+            selectedTargetId != null -> selectedTargetId = null
+        }
+    }
+
+    if (showPinDialog) {
+        ParentPinDialog(
+            pinManager = pinManager,
+            onDismiss = { showPinDialog = false },
+            onUnlocked = {
+                showPinDialog = false
+                showParentSettings = true
+            }
+        )
+    }
+
+    if (showParentSettings) {
+        ParentSettingsScreen(
+            bleManager = bleManager,
+            pinManager = pinManager,
+            checkBlePermissionsGranted = { checkBlePermissionsGranted() },
+            requestBlePermissions = { perms -> permissionLauncher.launch(perms) },
+            onBack = { showParentSettings = false }
+        )
+        return
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (selectedTarget != null) {
+                            IconButton(onClick = { selectedTargetId = null }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurück", tint = Color.White)
+                            }
+                        }
+                        Column {
+                            Text(
+                                text = selectedTarget?.title ?: "Meine Nachrichten",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 22.sp,
+                                color = Color.White
+                            )
+                            Text(
+                                text = if (isConnected) "Funkgerät bereit" else connectionState,
+                                fontSize = 13.sp,
+                                color = if (isConnected) Color(0xFFB9F6CA) else Color(0xFFFFCDD2)
+                            )
+                        }
+                    }
+                },
+                actions = {
+                    val hasOtherUnread = remember(unreadTargetIds, selectedTarget?.id) {
+                        unreadTargetIds.any { it != selectedTarget?.id }
+                    }
+                    if (hasOtherUnread) {
+                        var beaconAngle by remember { mutableFloatStateOf(0f) }
+                        LaunchedEffect(hasOtherUnread) {
+                            while (true) {
+                                beaconAngle = (beaconAngle + 15f) % 360f
+                                delay(40L)
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .clickable { selectedTargetId = null },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxSize()) {
+                                val center = this.center
+                                val outerRadius = size.minDimension / 2f
+                                drawCircle(
+                                    color = Color(0xFFFF5252).copy(alpha = 0.25f),
+                                    radius = outerRadius,
+                                    center = center
+                                )
+                                drawArc(
+                                    color = Color(0xFFFFEB3B).copy(alpha = 0.92f),
+                                    startAngle = beaconAngle - 35f,
+                                    sweepAngle = 70f,
+                                    useCenter = true
+                                )
+                                drawArc(
+                                    color = Color(0xFFFF7043).copy(alpha = 0.78f),
+                                    startAngle = (beaconAngle + 180f) - 30f,
+                                    sweepAngle = 60f,
+                                    useCenter = true
+                                )
+                                drawCircle(
+                                    color = Color(0xFFD50000),
+                                    radius = outerRadius * 0.34f,
+                                    center = center
+                                )
+                                drawCircle(
+                                    color = Color.White,
+                                    radius = outerRadius * 0.14f,
+                                    center = center
+                                )
+                            }
+                        }
+                    }
+                    IconButton(onClick = { showPinDialog = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Admin-Einstellungen",
+                            tint = Color.White
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.primary)
+            )
+        }
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (selectedTarget == null) {
+                KidTargetListScreen(
+                    targets = allowedTargets,
+                    messages = messages,
+                    unreadTargetIds = unreadTargetIds,
+                    alertCounter = alertCounter,
+                    onSelectTarget = {
+                        selectedTargetId = it.id
+                        bleManager.markTargetRead(it.id)
+                    }
+                )
+            } else {
+                val lastReadTimestamps by bleManager.lastReadTimestamps.collectAsState()
+                val chatOpenCutoffTs = remember(selectedTarget.id) {
+                    lastReadTimestamps[selectedTarget.id] ?: 0L
+                }
+                val orderedTargetMessages = remember(messages, selectedTarget.id) {
+                    messages
+                        .filter { it.targetId == selectedTarget.id }
+                        .sortedBy { it.timestamp }
+                        .takeLast(20)
+                }
+                val firstUnreadMsgId = remember(orderedTargetMessages, chatOpenCutoffTs) {
+                    if (chatOpenCutoffTs <= 0L) {
+                        null
+                    } else {
+                        orderedTargetMessages.firstOrNull { !it.isFromMe && it.timestamp > chatOpenCutoffTs }?.id
+                    }
+                }
+                KidChatScreen(
+                    target = selectedTarget,
+                    messages = orderedTargetMessages,
+                    firstUnreadMessageId = firstUnreadMsgId,
+                    quickReplies = quickReplies,
+                    isConnected = isConnected,
+                    onSendMessage = { text -> bleManager.sendMessage(selectedTarget, text) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun KidTargetListScreen(
+    targets: List<ChatTarget>,
+    messages: List<ChatMessage>,
+    unreadTargetIds: Set<String>,
+    alertCounter: Long,
+    onSelectTarget: (ChatTarget) -> Unit
+) {
+    var blinkPhase by remember { mutableStateOf(false) }
+    LaunchedEffect(unreadTargetIds, alertCounter) {
+        if (unreadTargetIds.isEmpty()) {
+            blinkPhase = false
+        } else {
+            while (true) {
+                blinkPhase = !blinkPhase
+                delay(450L)
+            }
+        }
+    }
+
+    if (targets.isEmpty()) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(32.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.Gray)
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Noch keine Chats freigegeben",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Bitte den Admin, oben rechts auf das Zahnrad zu tippen, um Kontakte oder Gruppenchats freizugeben.",
+                fontSize = 16.sp,
+                color = Color.DarkGray
+            )
+        }
+    } else {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(targets, key = { it.id }) { target ->
+                val lastMsg = messages.filter { it.targetId == target.id }.maxByOrNull { it.timestamp }
+                val isGroup = target.type == ChatTargetType.CHANNEL
+                val isUnread = unreadTargetIds.contains(target.id)
+                val isHighlightedNow = isUnread && blinkPhase
+                val containerColor = if (isHighlightedNow) Color(0xFFFFEE58) else Color.White
+                val border = if (isUnread) {
+                    BorderStroke(if (isHighlightedNow) 3.dp else 1.5.dp, Color(0xFFD32F2F))
+                } else null
+
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable { onSelectTarget(target) },
+                    shape = RoundedCornerShape(20.dp),
+                    border = border,
+                    elevation = CardDefaults.cardElevation(if (isHighlightedNow) 10.dp else 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = containerColor)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(20.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(if (isGroup) Color(0xFFC8E6C9) else Color(0xFFBBDEFB)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isGroup) Icons.Default.Groups else Icons.Default.Person,
+                                contentDescription = null,
+                                modifier = Modifier.size(32.dp),
+                                tint = if (isGroup) Color(0xFF2E7D32) else Color(0xFF1565C0)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(text = target.title, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                if (isUnread) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        color = if (isHighlightedNow) Color(0xFFD32F2F) else Color(0xFFE57373),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "NEU",
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            Text(
+                                text = lastMsg?.text ?: if (isGroup) "Gruppenchat" else "Tippe hier zum Schreiben!",
+                                fontSize = 15.sp,
+                                fontWeight = if (isUnread) FontWeight.SemiBold else FontWeight.Normal,
+                                color = if (isUnread) Color.Black else Color.Gray,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private val LINK_REGEX = Regex("""(https?://[^\s]+|www\.[^\s]+)""", RegexOption.IGNORE_CASE)
+
+private fun buildLinkAnnotatedText(text: String, baseColor: Color, linkColor: Color): AnnotatedString {
+    return buildAnnotatedString {
+        var lastIdx = 0
+        for (match in LINK_REGEX.findAll(text)) {
+            if (match.range.first > lastIdx) {
+                withStyle(SpanStyle(color = baseColor)) {
+                    append(text.substring(lastIdx, match.range.first))
+                }
+            }
+            withStyle(
+                SpanStyle(
+                    color = linkColor,
+                    textDecoration = TextDecoration.Underline,
+                    fontWeight = FontWeight.Medium
+                )
+            ) {
+                append(match.value)
+            }
+            lastIdx = match.range.last + 1
+        }
+        if (lastIdx < text.length) {
+            withStyle(SpanStyle(color = baseColor)) {
+                append(text.substring(lastIdx))
+            }
+        }
+    }
+}
+
+@Composable
+fun KidChatScreen(
+    target: ChatTarget,
+    messages: List<ChatMessage>,
+    firstUnreadMessageId: String? = null,
+    quickReplies: List<String>,
+    isConnected: Boolean,
+    onSendMessage: (String) -> Unit
+) {
+    var inputText by remember { mutableStateOf("") }
+    val clipboardManager = LocalClipboardManager.current
+
+    var replyTargetMsg by remember { mutableStateOf<ChatMessage?>(null) }
+    var replyDraftText by remember { mutableStateOf("") }
+    var copiedLinkText by remember { mutableStateOf<String?>(null) }
+
+    val blueGroupColor = Color(0xFF1E88E5)
+    val greenDeliveredColor = Color(0xFF2E7D32)
+    val redPendingOrFailedColor = Color(0xFFD32F2F)
+    val channelScope = target.channel?.regionScope?.trim().orEmpty()
+
+    if (copiedLinkText != null) {
+        AlertDialog(
+            onDismissRequest = { copiedLinkText = null },
+            title = { Text("Link erkannt") },
+            text = {
+                Text(
+                    text = copiedLinkText!!,
+                    color = Color(0xFF0D47A1),
+                    textDecoration = TextDecoration.Underline
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    clipboardManager.setText(AnnotatedString(copiedLinkText!!))
+                    copiedLinkText = null
+                }) {
+                    Text("Link kopieren")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { copiedLinkText = null }) {
+                    Text("Schließen")
+                }
+            }
+        )
+    }
+
+    if (replyTargetMsg != null) {
+        val targetMessage = replyTargetMsg!!
+        val displayAliasName = targetMessage.senderName?.trim().orEmpty()
+            .ifBlank { targetMessage.rawSenderName?.trim().orEmpty() }
+            .ifBlank { "Sender" }
+        val meshCoreNodeName = targetMessage.rawSenderName?.trim().orEmpty()
+            .ifBlank { displayAliasName }
+        AlertDialog(
+            onDismissRequest = { replyTargetMsg = null },
+            title = { Text("Antwort an $displayAliasName") },
+            text = {
+                Column {
+                    Text(
+                        text = "Nachricht: ${targetMessage.text}",
+                        fontSize = 13.sp,
+                        color = Color.DarkGray,
+                        maxLines = 2
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = replyDraftText,
+                        onValueChange = { if (it.toByteArray(Charsets.UTF_8).size <= MeshCoreBleManager.MAX_TEXT_BYTES) replyDraftText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("$displayAliasName: ...") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = isConnected && replyDraftText.isNotBlank(),
+                    onClick = {
+                        var body = replyDraftText.trim()
+                        val bracketRawPrefix = "@[$meshCoreNodeName]"
+                        val bracketAliasPrefix = "@[$displayAliasName]"
+                        val aliasColonPrefix = "$displayAliasName:"
+                        val rawColonPrefix = "$meshCoreNodeName:"
+                        val atRawPrefix = "@$meshCoreNodeName"
+                        val atAliasPrefix = "@$displayAliasName"
+                        body = when {
+                            body.startsWith(bracketRawPrefix, ignoreCase = true) ->
+                                body.substring(bracketRawPrefix.length).trimStart(':', ' ')
+                            body.startsWith(bracketAliasPrefix, ignoreCase = true) ->
+                                body.substring(bracketAliasPrefix.length).trimStart(':', ' ')
+                            body.startsWith(atRawPrefix, ignoreCase = true) ->
+                                body.substring(atRawPrefix.length).trimStart(':', ' ')
+                            body.startsWith(atAliasPrefix, ignoreCase = true) ->
+                                body.substring(atAliasPrefix.length).trimStart(':', ' ')
+                            body.startsWith(aliasColonPrefix, ignoreCase = true) ->
+                                body.substring(aliasColonPrefix.length).trimStart()
+                            body.startsWith(rawColonPrefix, ignoreCase = true) ->
+                                body.substring(rawColonPrefix.length).trimStart()
+                            else -> body
+                        }
+                        if (body.isNotBlank()) {
+                            val prefixText = "@[$meshCoreNodeName] "
+                            val prefixBytes = prefixText.toByteArray(Charsets.UTF_8).size
+                            val maxBodyBytes = (MeshCoreBleManager.MAX_TEXT_BYTES - prefixBytes).coerceAtLeast(0)
+                            val safeBody = with(MeshCoreBleManager) { body.takeUtf8Bytes(maxBodyBytes) }
+                            val fullMsg = (prefixText + safeBody).let { with(MeshCoreBleManager) { it.takeUtf8Bytes(MAX_TEXT_BYTES) } }
+                            onSendMessage(fullMsg)
+                            replyTargetMsg = null
+                            replyDraftText = ""
+                        }
+                    }
+                ) {
+                    Text("Senden")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { replyTargetMsg = null }) {
+                    Text("Abbrechen")
+                }
+            }
+        )
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (target.type == ChatTargetType.CHANNEL) {
+            Surface(
+                color = Color(0xFFE3F2FD),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = if (channelScope.isNotEmpty()) "Scope / Region: $channelScope" else "Scope / Region: Standard (kein Scope gesetzt)",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF0D47A1),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                )
+            }
+        }
+        val chatListState = androidx.compose.foundation.lazy.rememberLazyListState()
+        val lastMsg = messages.lastOrNull()
+        val lastMessageKey = lastMsg?.id
+        val lastIsFromMe = lastMsg?.isFromMe == true
+        val firstUnreadIndex = remember(messages, firstUnreadMessageId) {
+            if (firstUnreadMessageId == null) -1 else messages.indexOfFirst { it.id == firstUnreadMessageId }
+        }
+        LaunchedEffect(target.id, lastMessageKey, messages.size, firstUnreadIndex) {
+            if (messages.isEmpty()) return@LaunchedEffect
+            if (lastIsFromMe || firstUnreadIndex <= 0) {
+                chatListState.scrollToItem(messages.lastIndex)
+            } else {
+                chatListState.scrollToItem(messages.lastIndex)
+                kotlinx.coroutines.yield()
+                val firstVisible = chatListState.firstVisibleItemIndex
+                if (firstVisible > firstUnreadIndex) {
+                    chatListState.scrollToItem(firstUnreadIndex)
+                }
+            }
+        }
+        LazyColumn(
+            state = chatListState,
+            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(vertical = 12.dp)
+        ) {
+            items(messages, key = { it.id }) { msg ->
+                val isFirstUnread = (firstUnreadMessageId != null && msg.id == firstUnreadMessageId)
+                val isGroupMsg = target.type == ChatTargetType.CHANNEL ||
+                    msg.deliveryStatus == DeliveryStatus.GROUP_SENT ||
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER ||
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD
+                val bubbleColor = when {
+                    !msg.isFromMe -> Color.White
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> greenDeliveredColor
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> Color(0xFFEF6C00)
+                    isGroupMsg -> blueGroupColor
+                    msg.deliveryStatus == DeliveryStatus.DELIVERED -> greenDeliveredColor
+                    else -> redPendingOrFailedColor
+                }
+                val textColor = if (msg.isFromMe) Color.White else Color.Black
+                val linkColor = if (msg.isFromMe) Color(0xFFFFF59D) else Color(0xFF1565C0)
+                val foundLink = remember(msg.text) { LINK_REGEX.find(msg.text)?.value }
+                val canReplyInGroup = !msg.isFromMe && target.type == ChatTargetType.CHANNEL
+
+                val statusLabel = when {
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> "Mesh aktiv"
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> "Sende / warte auf Repeater..."
+                    isGroupMsg -> "Gesendet (Gruppe)"
+                    msg.deliveryStatus == DeliveryStatus.DELIVERED -> "Zugestellt"
+                    msg.deliveryStatus == DeliveryStatus.FAILED -> "Keine Zustellbestätigung"
+                    else -> "Warte auf Zustellbestätigung..."
+                }
+                val statusColor = when {
+                    msg.deliveryStatus == DeliveryStatus.GROUP_REPEATER_HEARD -> greenDeliveredColor
+                    msg.deliveryStatus == DeliveryStatus.GROUP_WAITING_REPEATER -> Color(0xFFEF6C00)
+                    isGroupMsg -> blueGroupColor
+                    msg.deliveryStatus == DeliveryStatus.DELIVERED -> greenDeliveredColor
+                    else -> redPendingOrFailedColor
+                }
+
+                if (isFirstUnread) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFFEF6C00))
+                        Surface(
+                            color = Color(0xFFFFF3E0),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Color(0xFFEF6C00))
+                        ) {
+                            Text(
+                                text = "Ungelesene Nachrichten",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE65100),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                        HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFFEF6C00))
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = if (msg.isFromMe) Arrangement.End else Arrangement.Start
+                ) {
+                    Column(horizontalAlignment = if (msg.isFromMe) Alignment.End else Alignment.Start) {
+                        if (!msg.isFromMe && target.type == ChatTargetType.CHANNEL && !msg.senderName.isNullOrBlank()) {
+                            Text(
+                                text = msg.senderName,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1565C0),
+                                modifier = Modifier.padding(start = 6.dp, bottom = 2.dp)
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = bubbleColor,
+                            shadowElevation = 2.dp,
+                            modifier = Modifier.pointerInput(msg.id, canReplyInGroup, foundLink) {
+                                detectTapGestures(
+                                    onTap = {
+                                        if (foundLink != null) {
+                                            copiedLinkText = foundLink
+                                        }
+                                    },
+                                    onPress = {
+                                        if (!canReplyInGroup) return@detectTapGestures
+                                        tryAwaitRelease()
+                                    },
+                                    onLongPress = {
+                                        if (canReplyInGroup) {
+                                            val displayAliasName = msg.senderName?.trim().orEmpty()
+                                                .ifBlank { msg.rawSenderName?.trim().orEmpty() }
+                                                .ifBlank { "Sender" }
+                                            replyTargetMsg = msg
+                                            replyDraftText = "$displayAliasName: "
+                                        }
+                                    }
+                                )
+                            }
+                        ) {
+                            Text(
+                                text = buildLinkAnnotatedText(msg.text, textColor, linkColor),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                fontSize = 18.sp
+                            )
+                        }
+                        if (msg.isFromMe) {
+                            Text(
+                                text = statusLabel,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = statusColor,
+                                modifier = Modifier.padding(top = 2.dp, start = 4.dp, end = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        LazyRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(quickReplies) { reply ->
+                AssistChip(
+                    onClick = { if (isConnected) onSendMessage(reply) },
+                    label = { Text(reply, fontSize = 15.sp) },
+                    shape = RoundedCornerShape(16.dp)
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().background(Color.White).padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedTextField(
+                value = inputText,
+                onValueChange = { if (it.toByteArray(Charsets.UTF_8).size <= MeshCoreBleManager.MAX_TEXT_BYTES) inputText = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Nachricht an ${target.title}...") },
+                shape = RoundedCornerShape(24.dp),
+                singleLine = true
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            FloatingActionButton(
+                onClick = {
+                    if (inputText.isNotBlank() && isConnected) {
+                        onSendMessage(inputText)
+                        inputText = ""
+                    }
+                },
+                containerColor = if (isConnected) Color(0xFF2E7D32) else Color.Gray,
+                shape = CircleShape
+            ) {
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Senden", tint = Color.White)
+            }
+        }
+    }
+}
+
+@Composable
+fun ParentPinDialog(
+    pinManager: ParentPinManager,
+    onDismiss: () -> Unit,
+    onUnlocked: () -> Unit
+) {
+    val isFirstSetup = remember { !pinManager.isPinConfigured() }
+    var enteredPin by remember { mutableStateOf("") }
+    var confirmSetupPin by remember { mutableStateOf("") }
+    var setupStepConfirm by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var lockoutSeconds by remember { mutableLongStateOf(pinManager.remainingLockoutSeconds()) }
+
+    LaunchedEffect(lockoutSeconds) {
+        if (lockoutSeconds > 0L) {
+            while (true) {
+                delay(1_000L)
+                val rem = pinManager.remainingLockoutSeconds()
+                lockoutSeconds = rem
+                if (rem <= 0L) {
+                    errorMessage = null
+                    break
+                }
+            }
+        }
+    }
+
+    fun submitPin() {
+        val rem = pinManager.remainingLockoutSeconds()
+        if (rem > 0L) {
+            lockoutSeconds = rem
+            errorMessage = "Zu viele Fehlversuche. Bitte in ${rem} Sek. erneut versuchen."
+            return
+        }
+        if (isFirstSetup) {
+            if (!setupStepConfirm) {
+                if (!ParentPinManager.isValidPin(enteredPin)) {
+                    errorMessage = "Bitte zuerst eine eigene Eltern-PIN (4–12 Ziffern) festlegen."
+                } else {
+                    confirmSetupPin = enteredPin
+                    enteredPin = ""
+                    setupStepConfirm = true
+                    errorMessage = "Bitte die neue Eltern-PIN zur Bestätigung erneut eingeben."
+                }
+            } else {
+                if (enteredPin != confirmSetupPin) {
+                    enteredPin = ""
+                    confirmSetupPin = ""
+                    setupStepConfirm = false
+                    errorMessage = "Die beiden PINs stimmen nicht überein. Bitte neu starten."
+                } else if (pinManager.setPin(enteredPin)) {
+                    onUnlocked()
+                } else {
+                    errorMessage = "PIN konnte nicht gespeichert werden."
+                }
+            }
+            return
+        }
+
+        val res = pinManager.verifyPinDetailed(enteredPin)
+        if (res.success) {
+            onUnlocked()
+        } else {
+            enteredPin = ""
+            lockoutSeconds = res.remainingLockoutSeconds
+            errorMessage = if (res.remainingLockoutSeconds > 0L) {
+                "Zu viele Fehlversuche. Bitte in ${res.remainingLockoutSeconds} Sek. erneut versuchen."
+            } else {
+                "Falsche PIN! (Versuch ${res.failedAttempts})"
+            }
+        }
+    }
+
+    fun appendDigit(d: String) {
+        if (lockoutSeconds > 0L) return
+        if (enteredPin.length < ParentPinManager.MAX_PIN_LENGTH) {
+            enteredPin += d
+            if (lockoutSeconds <= 0L) {
+                errorMessage = null
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (isFirstSetup) "Eltern-PIN festlegen" else "Elternbereich schützen"
+            )
+        },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                val promptText = when {
+                    isFirstSetup && !setupStepConfirm ->
+                        "Noch keine Eltern-PIN gesetzt. Bitte eigene PIN (4–12 Ziffern) festlegen:"
+                    isFirstSetup ->
+                        "Bitte gewählte Eltern-PIN wiederholen:"
+                    else ->
+                        "Bitte Admin-PIN eingeben:"
+                }
+                Text(promptText)
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = enteredPin,
+                    enabled = lockoutSeconds <= 0L,
+                    onValueChange = { raw ->
+                        if (lockoutSeconds <= 0L) {
+                            enteredPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
+                            errorMessage = null
+                        }
+                    },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    singleLine = true
+                )
+                if (errorMessage != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(errorMessage!!, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                val rows = listOf(
+                    listOf("1", "2", "3"),
+                    listOf("4", "5", "6"),
+                    listOf("7", "8", "9"),
+                    listOf("Löschen", "0", "OK")
+                )
+                rows.forEach { r ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        r.forEach { label ->
+                            OutlinedButton(
+                                enabled = lockoutSeconds <= 0L || label == "Löschen",
+                                onClick = {
+                                    when (label) {
+                                        "Löschen" -> {
+                                            if (enteredPin.isNotEmpty()) {
+                                                enteredPin = enteredPin.dropLast(1)
+                                            }
+                                        }
+                                        "OK" -> submitPin()
+                                        else -> appendDigit(label)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f).height(44.dp),
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text(label, fontSize = 12.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = lockoutSeconds <= 0L,
+                onClick = { submitPin() }
+            ) {
+                Text(if (isFirstSetup) (if (setupStepConfirm) "Speichern" else "Weiter") else "Entsperren")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Abbrechen")
+            }
+        }
+    )
+}
+
+@Composable
+fun ParentSettingsScreen(
+    bleManager: MeshCoreBleManager,
+    pinManager: ParentPinManager,
+    checkBlePermissionsGranted: () -> Boolean,
+    requestBlePermissions: (Array<String>) -> Unit,
+    onBack: () -> Unit
+) {
+    val devices by bleManager.discoveredDevices.collectAsState()
+    val contacts by bleManager.contacts.collectAsState()
+    val channels by bleManager.channels.collectAsState()
+    val connectionState by bleManager.connectionState.collectAsState()
+
+    val manualGroupAliases by bleManager.manualGroupAliases.collectAsState()
+    var manualChatName by remember { mutableStateOf("") }
+    var manualAliasName by remember { mutableStateOf("") }
+    val deviceNodeName by bleManager.deviceNodeName.collectAsState()
+    var kidName by remember { mutableStateOf(deviceNodeName) }
+    var userEditedKidName by remember { mutableStateOf(false) }
+
+    LaunchedEffect(deviceNodeName) {
+        if (deviceNodeName.isNotBlank() && (!userEditedKidName || kidName.isBlank())) {
+            kidName = deviceNodeName
+            userEditedKidName = false
+        }
+    }
+    var newPin by remember { mutableStateOf("") }
+    var confirmNewPin by remember { mutableStateOf("") }
+    var pinErrorPopupMessage by remember { mutableStateOf<String?>(null) }
+    var scopePopupChannel by remember { mutableStateOf<MeshChannel?>(null) }
+
+    var infoBanner by remember { mutableStateOf<String?>(null) }
+
+    if (pinErrorPopupMessage != null) {
+        AlertDialog(
+            onDismissRequest = { pinErrorPopupMessage = null },
+            title = { Text("Admin-PIN ungültig") },
+            text = { Text(pinErrorPopupMessage!!) },
+            confirmButton = {
+                Button(onClick = { pinErrorPopupMessage = null }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
+
+    if (scopePopupChannel != null) {
+        val targetCh = scopePopupChannel!!
+        var popupScopeField by remember(targetCh.index) { mutableStateOf(targetCh.regionScope) }
+        var popupMenuExpanded by remember(targetCh.index) { mutableStateOf(false) }
+        val popupFilteredScopes = remember(popupScopeField) {
+            val q = popupScopeField.trim().lowercase()
+            if (q.isEmpty()) {
+                MeshCoreBleManager.KNOWN_SCOPES.take(10)
+            } else {
+                val startsWithMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                    it.lowercase().startsWith(q)
+                }
+                val containsMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                    !it.lowercase().startsWith(q) && it.lowercase().contains(q)
+                }
+                (startsWithMatches + containsMatches).take(10)
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { scopePopupChannel = null },
+            title = {
+                Text(
+                    text = "Kanal ${targetCh.index} freigegeben",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = Color(0xFFFFF8E1),
+                    border = BorderStroke(1.5.dp, Color(0xFFF57C00))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                color = Color(0xFFEF6C00),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "SCOPE",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            Text(
+                                text = "Region / Scope für ${targetCh.displayName}",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFE65100)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ExposedDropdownMenuBox(
+                            expanded = popupMenuExpanded && popupFilteredScopes.isNotEmpty(),
+                            onExpandedChange = { expanded ->
+                                popupMenuExpanded = expanded && popupFilteredScopes.isNotEmpty()
+                            }
+                        ) {
+                            OutlinedTextField(
+                                value = popupScopeField,
+                                onValueChange = { raw ->
+                                    if (raw.length <= 32) {
+                                        popupScopeField = raw
+                                        popupMenuExpanded = popupFilteredScopes.isNotEmpty()
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .menuAnchor()
+                                    .onFocusChanged { focusState ->
+                                        if (focusState.isFocused && popupFilteredScopes.isNotEmpty()) {
+                                            popupMenuExpanded = true
+                                        }
+                                    },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White,
+                                    focusedBorderColor = Color(0xFFEF6C00),
+                                    unfocusedBorderColor = Color(0xFFFF9800)
+                                ),
+                                placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, nrw)") },
+                                singleLine = true
+                            )
+                            ExposedDropdownMenu(
+                                expanded = popupMenuExpanded && popupFilteredScopes.isNotEmpty(),
+                                onDismissRequest = { popupMenuExpanded = false }
+                            ) {
+                                popupFilteredScopes.forEach { candidateScope ->
+                                    DropdownMenuItem(
+                                        text = { Text(candidateScope) },
+                                        onClick = {
+                                            popupScopeField = candidateScope
+                                            popupMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    bleManager.setChannelRegionScope(targetCh.index, popupScopeField)
+                    infoBanner = if (popupScopeField.isNotBlank()) {
+                        "Scope '${popupScopeField.trim()}' für Kanal ${targetCh.index} gespeichert."
+                    } else {
+                        "Kanal ${targetCh.index} ohne Scope freigegeben."
+                    }
+                    scopePopupChannel = null
+                }) {
+                    Text("Speichern")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    bleManager.setChannelRegionScope(targetCh.index, "")
+                    bleManager.applyChannelFloodScope("")
+                    infoBanner = "Kanal ${targetCh.index} auf Standard (ohne Scope) zurückgesetzt."
+                    scopePopupChannel = null
+                }) {
+                    Text("Ohne Scope")
+                }
+            }
+        )
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("Admin-Einstellungen")
+                        Text(
+                            text = "MeshKidsChat v${MeshCoreBleManager.APP_VERSION}",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Zurück")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            if (infoBanner != null) {
+                item {
+                    Surface(
+                        color = Color(0xFFE8F5E9),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = infoBanner!!,
+                            color = Color(0xFF1B5E20),
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+            }
+
+            item {
+                val activeConnMode by bleManager.connectionMode.collectAsState()
+                val savedWifiHost by bleManager.wifiHostOrDyndns.collectAsState()
+                val savedWifiPort by bleManager.wifiPort.collectAsState()
+                var wifiHostInput by remember(savedWifiHost) { mutableStateOf(savedWifiHost) }
+                var wifiPortInput by remember(savedWifiPort) { mutableStateOf(savedWifiPort.toString()) }
+
+                Text("1. MeshCore Funkgerät koppeln ($connectionState)", fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = activeConnMode == "BLE",
+                        onClick = {
+                            bleManager.setConnectionMode("BLE", connectNow = true)
+                            infoBanner = "Verbindungsart: BLE"
+                        },
+                        label = { Text("BLE") }
+                    )
+                    FilterChip(
+                        selected = activeConnMode == "WIFI",
+                        onClick = {
+                            bleManager.setConnectionMode("WIFI", connectNow = false)
+                            if (wifiHostInput.isNotBlank()) {
+                                val parsedPort = wifiPortInput.trim().toIntOrNull() ?: MeshCoreBleManager.DEFAULT_WIFI_PORT
+                                bleManager.updateWifiEndpoint(wifiHostInput, parsedPort, connectNow = true)
+                            }
+                            infoBanner = "Verbindungsart: WLAN (TCP)"
+                        },
+                        label = { Text("WLAN (TCP)") }
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+
+                if (activeConnMode == "WIFI") {
+                    OutlinedTextField(
+                        value = wifiHostInput,
+                        onValueChange = { wifiHostInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Lokale IP-Adresse oder Hostname") },
+                        placeholder = { Text("z. B. 192.168.178.50 oder meshcore.local") },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Sicherheitshinweis: Bitte nur im lokalen Heimnetz verwenden und Port 5000 nicht per Portweiterleitung öffnen (keine Verschlüsselung/Anmeldung). Für unterwegs ein VPN (z. B. WireGuard oder Tailscale) nutzen.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = wifiPortInput,
+                            onValueChange = { raw ->
+                                wifiPortInput = raw.filter { it.isDigit() }.take(5)
+                            },
+                            modifier = Modifier.width(130.dp),
+                            label = { Text("Port") },
+                            placeholder = { Text("5000") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true
+                        )
+                        Button(
+                            onClick = {
+                                val parsedPort = wifiPortInput.trim().toIntOrNull()
+                                if (parsedPort == null || parsedPort !in 1..65535) {
+                                    infoBanner = "Bitte einen gültigen Port (1–65535, Standard 5000) eingeben."
+                                } else if (wifiHostInput.isBlank()) {
+                                    infoBanner = "Bitte eine lokale IP-Adresse oder einen Hostnamen eingeben."
+                                } else {
+                                    bleManager.updateWifiEndpoint(wifiHostInput, parsedPort, connectNow = true)
+                                    infoBanner = "WLAN-Ziel gespeichert und Verbindung gestartet."
+                                }
+                            }
+                        ) {
+                            Text("Verbinden")
+                        }
+                        OutlinedButton(onClick = {
+                            bleManager.sendAdvertNow()
+                            infoBanner = "Gerätesignal (Advert) gesendet."
+                        }) {
+                            Text("Advert")
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(onClick = {
+                        bleManager.disconnect()
+                        infoBanner = "Verbindung getrennt und Hintergrunddienst beendet."
+                    }) {
+                        Text("Trennen")
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            if (!checkBlePermissionsGranted()) {
+                                val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                    arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+                                } else {
+                                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                                }
+                                infoBanner = "Bitte Bluetooth-Berechtigungen erteilen..."
+                                requestBlePermissions(perms)
+                            } else {
+                                val started = bleManager.startScan()
+                                infoBanner = if (started) {
+                                    "BLE-Suche läuft (8 Sek.)..."
+                                } else {
+                                    bleManager.connectionState.value
+                                }
+                            }
+                        }) {
+                            Text("BLE suchen")
+                        }
+                        OutlinedButton(onClick = {
+                            bleManager.sendAdvertNow()
+                            infoBanner = "Gerätesignal (Advert) gesendet."
+                        }) {
+                            Text("Advert senden")
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedButton(onClick = {
+                        bleManager.disconnect()
+                        infoBanner = "Verbindung getrennt und Hintergrunddienst beendet."
+                    }) {
+                        Text("Trennen")
+                    }
+                }
+            }
+
+            items(devices) { device ->
+                OutlinedButton(
+                    onClick = { bleManager.connectToDevice(device) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("${device.name ?: "MeshCore Gerät"} (${device.address})")
+                }
+            }
+
+            item {
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("2. Kontakte & Alias-Namen (z. B. Mama, Papa)", fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedButton(onClick = { bleManager.syncContacts() }) {
+                    Text("Kontakte vom Funkgerät laden")
+                }
+            }
+
+            item {
+                var contactSearch by remember { mutableStateOf("") }
+                var contactPage by remember { mutableStateOf(0) }
+                val pageSize = 10
+
+                val sortedContacts = remember(contacts, contactSearch) {
+                    val q = contactSearch.trim().lowercase()
+                    contacts
+                        .filter { c -> c.nodeType != 2 }
+                        .filter { c ->
+                            q.isEmpty() ||
+                                c.displayName.lowercase().contains(q) ||
+                                c.originalName.lowercase().contains(q) ||
+                                c.pubKeyPrefixHex.lowercase().contains(q)
+                        }
+                        .sortedWith(
+                            compareByDescending<MeshContact> { it.isAllowedForKid }
+                                .thenBy { it.displayName.lowercase() }
+                        )
+                }
+
+                val totalPages = ((sortedContacts.size + pageSize - 1) / pageSize).coerceAtLeast(1)
+                val safePage = contactPage.coerceIn(0, totalPages - 1)
+                LaunchedEffect(totalPages) {
+                    if (contactPage >= totalPages) contactPage = (totalPages - 1).coerceAtLeast(0)
+                }
+
+                val pageContacts = remember(sortedContacts, safePage) {
+                    val fromIdx = safePage * pageSize
+                    val toIdx = minOf(fromIdx + pageSize, sortedContacts.size)
+                    if (fromIdx < toIdx) sortedContacts.subList(fromIdx, toIdx) else emptyList()
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF7FAFC))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        OutlinedTextField(
+                            value = contactSearch,
+                            onValueChange = {
+                                contactSearch = it
+                                contactPage = 0
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("Kontakte filtern (Name oder Hex)...") },
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { if (safePage > 0) contactPage = safePage - 1 },
+                                enabled = safePage > 0,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                            }
+                            Text(
+                                text = "Seite ${safePage + 1} / $totalPages (${sortedContacts.size} Kontakte)",
+                                modifier = Modifier.weight(1f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2
+                            )
+                            OutlinedButton(
+                                onClick = { if (safePage < totalPages - 1) contactPage = safePage + 1 },
+                                enabled = safePage < totalPages - 1,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                            }
+                        }
+
+                        if (pageContacts.isEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Keine Kontakte gefunden.",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        } else {
+                            pageContacts.forEach { contact ->
+                                var aliasField by remember(contact.pubKeyPrefixHex, contact.aliasName) {
+                                    mutableStateOf(contact.aliasName)
+                                }
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            val typeTag = if (contact.nodeType == 3) " • Roomserver" else ""
+                                            Text(text = contact.displayName, fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                text = "${contact.originalName} (${contact.pubKeyPrefixHex})$typeTag",
+                                                fontSize = 12.sp,
+                                                color = Color.Gray
+                                            )
+                                        }
+                                        Switch(
+                                            checked = contact.isAllowedForKid,
+                                            onCheckedChange = {
+                                                bleManager.toggleContactAllowed(contact.pubKeyPrefixHex, it)
+                                            }
+                                        )
+                                    }
+                                    var aliasFocused by remember(contact.pubKeyPrefixHex) { mutableStateOf(false) }
+                                    OutlinedTextField(
+                                        value = aliasField,
+                                        onValueChange = { aliasField = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .onFocusChanged { focusState ->
+                                                val nowFocused = focusState.isFocused
+                                                if (aliasFocused && !nowFocused && aliasField != contact.aliasName) {
+                                                    bleManager.setContactAlias(contact.pubKeyPrefixHex, aliasField)
+                                                    infoBanner = "Alias für Kontakt gespeichert."
+                                                }
+                                                aliasFocused = nowFocused
+                                            },
+                                        placeholder = { Text("Alias (z. B. Mama) – wird beim Verlassen gespeichert") },
+                                        singleLine = true
+                                    )
+                                }
+                            }
+                        }
+
+                        if (totalPages > 1) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { if (safePage > 0) contactPage = safePage - 1 },
+                                    enabled = safePage > 0,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                                }
+                                Text(
+                                    text = "Seite ${safePage + 1} / $totalPages",
+                                    modifier = Modifier.weight(1f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    fontSize = 12.sp,
+                                    color = Color.Gray,
+                                    maxLines = 2
+                                )
+                                OutlinedButton(
+                                    onClick = { if (safePage < totalPages - 1) contactPage = safePage + 1 },
+                                    enabled = safePage < totalPages - 1,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text("Zusätzliche Alias-Namen nur für Gruppenchats (ohne Geräte-Kontakt)", fontWeight = FontWeight.SemiBold)
+                Text("Falls ein Absender aus dem Chat nicht in der Geräte-Kontaktliste steht, hier Namen aus dem Chat und Alias eintragen.", fontSize = 12.sp, color = Color.Gray)
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = manualChatName,
+                    onValueChange = { if (it.length <= 48) manualChatName = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Name aus dem Chat (z. B. NW-E-4711)") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = manualAliasName,
+                        onValueChange = { if (it.length <= 24) manualAliasName = it },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("Gewünschter Alias (z. B. Dieter)") },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = {
+                        if (manualChatName.isNotBlank() && manualAliasName.isNotBlank()) {
+                            bleManager.addOrUpdateManualGroupAlias(manualChatName, manualAliasName)
+                            infoBanner = "Gruppen-Alias '${manualAliasName.trim()}' für '${manualChatName.trim()}' gespeichert."
+                            manualChatName = ""
+                            manualAliasName = ""
+                        }
+                    }) {
+                        Text("Hinzufügen")
+                    }
+                }
+            }
+
+            items(manualGroupAliases.entries.toList(), key = { "manual_${it.key}" }) { entry ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = entry.value, fontWeight = FontWeight.SemiBold)
+                        Text(text = "Chat-Name: ${entry.key}", fontSize = 12.sp, color = Color.Gray)
+                    }
+                    TextButton(onClick = {
+                        bleManager.removeManualGroupAlias(entry.key)
+                        infoBanner = "Gruppen-Alias für '${entry.key}' entfernt."
+                    }) {
+                        Text("Löschen")
+                    }
+                }
+            }
+
+            item {
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("3. Gruppenchat / Kanäle aus Gerät übernehmen", fontWeight = FontWeight.Bold)
+                Text("Kanäle werden nur aus dem Funkgerät ausgelesen und nicht neu angelegt oder überschrieben. Du kannst hier einen Alias vergeben und den Chat freigeben.", fontSize = 13.sp, color = Color.Gray)
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = {
+                    bleManager.syncChannelsFromDevice()
+                    infoBanner = "Kanäle werden aus dem Funkgerät geladen..."
+                }) {
+                    Text("Kanäle aus Gerät laden")
+                }
+                if (channels.isEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Noch keine Kanäle vom Gerät übernommen. Bitte mit Funkgerät verbinden und auf 'Kanäle aus Gerät laden' tippen.",
+                        fontSize = 13.sp,
+                        color = Color.Gray
+                    )
+                }
+            }
+
+            item {
+                var channelSearch by remember { mutableStateOf("") }
+                var channelPage by remember { mutableStateOf(0) }
+                val channelPageSize = 5
+
+                val sortedChannels = remember(channels, channelSearch) {
+                    val q = channelSearch.trim().lowercase()
+                    channels
+                        .filter { ch ->
+                            q.isEmpty() ||
+                                ch.displayName.lowercase().contains(q) ||
+                                ch.originalName.lowercase().contains(q) ||
+                                ch.regionScope.lowercase().contains(q) ||
+                                ch.index.toString() == q
+                        }
+                        .sortedWith(
+                            compareByDescending<MeshChannel> { it.isAllowedForKid }
+                                .thenBy { it.index }
+                        )
+                }
+
+                val totalChannelPages = ((sortedChannels.size + channelPageSize - 1) / channelPageSize).coerceAtLeast(1)
+                val safeChannelPage = channelPage.coerceIn(0, totalChannelPages - 1)
+                LaunchedEffect(totalChannelPages) {
+                    if (channelPage >= totalChannelPages) channelPage = (totalChannelPages - 1).coerceAtLeast(0)
+                }
+
+                val pageChannels = remember(sortedChannels, safeChannelPage) {
+                    val fromIdx = safeChannelPage * channelPageSize
+                    val toIdx = minOf(fromIdx + channelPageSize, sortedChannels.size)
+                    if (fromIdx < toIdx) sortedChannels.subList(fromIdx, toIdx) else emptyList()
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF7FAFC))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                        OutlinedTextField(
+                            value = channelSearch,
+                            onValueChange = {
+                                channelSearch = it
+                                channelPage = 0
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("Kanäle filtern (Name, Scope oder Nr.)...") },
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { if (safeChannelPage > 0) channelPage = safeChannelPage - 1 },
+                                enabled = safeChannelPage > 0,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                            }
+                            Text(
+                                text = "Seite ${safeChannelPage + 1} / $totalChannelPages (${sortedChannels.size} Kanäle)",
+                                modifier = Modifier.weight(1f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2
+                            )
+                            OutlinedButton(
+                                onClick = { if (safeChannelPage < totalChannelPages - 1) channelPage = safeChannelPage + 1 },
+                                enabled = safeChannelPage < totalChannelPages - 1,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                            }
+                        }
+
+                        if (pageChannels.isEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Keine Kanäle gefunden.",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                        } else {
+                            pageChannels.forEach { channel ->
+                                var aliasField by remember(channel.index, channel.aliasName) {
+                                    mutableStateOf(channel.aliasName)
+                                }
+                                var scopeField by remember(channel.index, channel.regionScope) {
+                                    mutableStateOf(channel.regionScope)
+                                }
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(text = "Kanal ${channel.index}: ${channel.displayName}", fontWeight = FontWeight.Bold)
+                                            Text(
+                                                text = "Gerätekanal: ${channel.originalName} • ${if (channel.isEncryptedPskSet) "PSK im Gerät" else "Offen / kein PSK"}",
+                                                fontSize = 12.sp,
+                                                color = Color.Gray
+                                            )
+                                            Text(
+                                                text = "Scope / Region: ${channel.regionScope.ifBlank { "Standard" }}",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF1565C0)
+                                            )
+                                        }
+                                        Switch(
+                                            checked = channel.isAllowedForKid,
+                                            onCheckedChange = { enabled ->
+                                                bleManager.toggleChannelAllowed(channel.index, enabled)
+                                                if (enabled) {
+                                                    scopePopupChannel = channel
+                                                }
+                                            }
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    var chAliasFocused by remember(channel.index) { mutableStateOf(false) }
+                                    OutlinedTextField(
+                                        value = aliasField,
+                                        onValueChange = { aliasField = it },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .onFocusChanged { focusState ->
+                                                val nowFocused = focusState.isFocused
+                                                if (chAliasFocused && !nowFocused && aliasField != channel.aliasName) {
+                                                    bleManager.setChannelAlias(channel.index, aliasField)
+                                                    infoBanner = "Alias für Kanal ${channel.index} gespeichert."
+                                                }
+                                                chAliasFocused = nowFocused
+                                            },
+                                        placeholder = { Text("Alias (z. B. Familie) – wird beim Verlassen gespeichert") },
+                                        singleLine = true
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    var scopeFocused by remember(channel.index) { mutableStateOf(false) }
+                                    var scopeMenuExpanded by remember(channel.index) { mutableStateOf(false) }
+                                    val filteredScopes = remember(scopeField) {
+                                        val q = scopeField.trim().lowercase()
+                                        if (q.isEmpty()) {
+                                            MeshCoreBleManager.KNOWN_SCOPES.take(10)
+                                        } else {
+                                            val startsWithMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                                                it.lowercase().startsWith(q)
+                                            }
+                                            val containsMatches = MeshCoreBleManager.KNOWN_SCOPES.filter {
+                                                !it.lowercase().startsWith(q) && it.lowercase().contains(q)
+                                            }
+                                            (startsWithMatches + containsMatches).take(10)
+                                        }
+                                    }
+
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = Color(0xFFFFF8E1),
+                                        border = BorderStroke(1.5.dp, Color(0xFFF57C00))
+                                    ) {
+                                        Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Surface(
+                                                    color = Color(0xFFEF6C00),
+                                                    shape = RoundedCornerShape(6.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "SCOPE",
+                                                        color = Color.White,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                                Text(
+                                                    text = "Region / Scope für Kanal ${channel.index}",
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFFE65100)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.height(6.dp))
+                                            ExposedDropdownMenuBox(
+                                                expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                                                onExpandedChange = { expanded ->
+                                                    scopeMenuExpanded = expanded && filteredScopes.isNotEmpty()
+                                                }
+                                            ) {
+                                                OutlinedTextField(
+                                                    value = scopeField,
+                                                    onValueChange = { raw ->
+                                                        if (raw.length <= 32) {
+                                                            scopeField = raw
+                                                            scopeMenuExpanded = filteredScopes.isNotEmpty()
+                                                        }
+                                                    },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .menuAnchor()
+                                                        .onFocusChanged { focusState ->
+                                                            val nowFocused = focusState.isFocused
+                                                            if (nowFocused && filteredScopes.isNotEmpty()) {
+                                                                scopeMenuExpanded = true
+                                                            } else if (scopeFocused && !nowFocused) {
+                                                                scopeMenuExpanded = false
+                                                                if (scopeField != channel.regionScope) {
+                                                                    bleManager.setChannelRegionScope(channel.index, scopeField)
+                                                                    infoBanner = "Scope für Kanal ${channel.index} gespeichert."
+                                                                }
+                                                            }
+                                                            scopeFocused = nowFocused
+                                                        },
+                                                    colors = OutlinedTextFieldDefaults.colors(
+                                                        focusedContainerColor = Color.White,
+                                                        unfocusedContainerColor = Color.White,
+                                                        focusedBorderColor = Color(0xFFEF6C00),
+                                                        unfocusedBorderColor = Color(0xFFFF9800)
+                                                    ),
+                                                    placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, nrw)") },
+                                                    singleLine = true
+                                                )
+                                                ExposedDropdownMenu(
+                                                    expanded = scopeMenuExpanded && filteredScopes.isNotEmpty(),
+                                                    onDismissRequest = { scopeMenuExpanded = false }
+                                                ) {
+                                                    filteredScopes.forEach { candidateScope ->
+                                                        DropdownMenuItem(
+                                                            text = { Text(candidateScope) },
+                                                            onClick = {
+                                                                scopeField = candidateScope
+                                                                scopeMenuExpanded = false
+                                                                bleManager.setChannelRegionScope(channel.index, candidateScope)
+                                                                infoBanner = "Scope '$candidateScope' für Kanal ${channel.index} gespeichert."
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (totalChannelPages > 1) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { if (safeChannelPage > 0) channelPage = safeChannelPage - 1 },
+                                    enabled = safeChannelPage > 0,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text("◀ Zurück", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                                }
+                                Text(
+                                    text = "Seite ${safeChannelPage + 1} / $totalChannelPages",
+                                    modifier = Modifier.weight(1f),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    fontSize = 12.sp,
+                                    color = Color.Gray,
+                                    maxLines = 2
+                                )
+                                OutlinedButton(
+                                    onClick = { if (safeChannelPage < totalChannelPages - 1) channelPage = safeChannelPage + 1 },
+                                    enabled = safeChannelPage < totalChannelPages - 1,
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Weiter ▶", maxLines = 1, softWrap = false, fontSize = 12.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("4. Anzeigename des Kindes im Mesh", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (deviceNodeName.isNotBlank()) {
+                        "Aktueller Node-Name im Gerät: $deviceNodeName"
+                    } else {
+                        "Aktueller Node-Name im Gerät: wird bei Verbindung ausgelesen..."
+                    },
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = kidName,
+                        onValueChange = {
+                            kidName = it
+                            userEditedKidName = true
+                        },
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("z. B. Leo") },
+                        singleLine = true
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(onClick = {
+                        if (kidName.isNotBlank()) {
+                            bleManager.setKidNodeName(kidName)
+                            userEditedKidName = false
+                            infoBanner = "Gerätename '$kidName' gesetzt."
+                        }
+                    }) {
+                        Text("Speichern")
+                    }
+                }
+            }
+
+            item {
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("5. Admin-PIN ändern", fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = newPin,
+                    onValueChange = { raw ->
+                        newPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    label = { Text("Neue PIN (4–12 Ziffern)") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = confirmNewPin,
+                    onValueChange = { raw ->
+                        confirmNewPin = raw.filter { it in '0'..'9' }.take(ParentPinManager.MAX_PIN_LENGTH)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    label = { Text("Neue PIN wiederholen") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        when {
+                            !ParentPinManager.isValidPin(newPin) -> {
+                                pinErrorPopupMessage = "Die Admin-PIN muss aus 4 bis 12 Ziffern (0–9) bestehen."
+                            }
+                            newPin != confirmNewPin -> {
+                                pinErrorPopupMessage = "Die beiden eingegebenen PINs stimmen nicht überein. Bitte beide Felder identisch ausfüllen."
+                            }
+                            pinManager.setPin(newPin) -> {
+                                newPin = ""
+                                confirmNewPin = ""
+                                pinErrorPopupMessage = null
+                                infoBanner = "Admin-PIN wurde geändert."
+                            }
+                            else -> {
+                                pinErrorPopupMessage = "Die Admin-PIN konnte nicht gespeichert werden."
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("PIN setzen")
+                }
+            }
+
+            item {
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                val currentReplies by bleManager.quickReplies.collectAsState()
+                var reply1 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(0) { "" }) }
+                var reply2 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(1) { "" }) }
+                var reply3 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(2) { "" }) }
+                var reply4 by remember(currentReplies) { mutableStateOf(currentReplies.getOrElse(3) { "" }) }
+
+                Text("6. Voreingestellte Schnelltexte (unten im Chat)", fontWeight = FontWeight.Bold)
+                Text("Diese Felder erscheinen direkt über dem Eingabefeld im Chat und können angepasst werden.", fontSize = 13.sp, color = Color.Gray)
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = reply1,
+                    onValueChange = { if (it.length <= 60) reply1 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 1") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = reply2,
+                    onValueChange = { if (it.length <= 60) reply2 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 2") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = reply3,
+                    onValueChange = { if (it.length <= 60) reply3 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 3") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = reply4,
+                    onValueChange = { if (it.length <= 60) reply4 = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Feld 4") },
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        bleManager.setQuickReplies(listOf(reply1, reply2, reply3, reply4))
+                        infoBanner = "Schnelltexte gespeichert."
+                    }) {
+                        Text("Schnelltexte speichern")
+                    }
+                    OutlinedButton(onClick = {
+                        bleManager.setQuickReplies(MeshCoreBleManager.DEFAULT_QUICK_REPLIES)
+                        infoBanner = "Standard-Schnelltexte wiederhergestellt."
+                    }) {
+                        Text("Standard")
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "App-Version: ${MeshCoreBleManager.APP_VERSION}",
+                    fontSize = 13.sp,
+                    color = Color.Gray
+                )
+            }
+        }
+    }
+}

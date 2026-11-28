@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.meshkids"
-    compileSdk = 34
+    namespace = "de.meshkidschat.app"
+    compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.meshkids"
+        applicationId = "de.meshkidschat.app"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 20
         versionName = "2.9"
     }
