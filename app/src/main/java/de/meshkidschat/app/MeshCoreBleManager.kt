@@ -1298,25 +1298,42 @@ class MeshCoreBleManager(private val context: Context) {
         }
     }
 
-    private fun prepareForNodeSwitch(newNodeKey: String) {
-        val previousNode = lastConnectedNodeKey
-        if (previousNode != null && previousNode != newNodeKey) {
-            _contacts.value = emptyList()
-            saveCachedContacts(emptyList())
-            _channels.value = (0 until MAX_CHANNELS).map { idx ->
-                val savedAlias = prefs.getString("channel_alias_$idx", "") ?: ""
-                val savedAllowed = prefs.getBoolean("channel_allowed_$idx", false)
-                val savedScope = prefs.getString("channel_scope_$idx", "") ?: ""
-                MeshChannel(
-                    index = idx,
-                    originalName = "Kanal $idx",
-                    aliasName = savedAlias,
-                    isAllowedForKid = savedAllowed,
-                    regionScope = savedScope
-                )
+    private fun wipeNodeScopedData() {
+        val editor = prefs.edit()
+        editor.remove("allowed_channels")
+        editor.remove("allowed_contacts")
+        editor.remove("cached_contacts_json")
+        editor.remove("manual_group_aliases_json")
+        for (idx in 0 until MAX_CHANNELS) {
+            editor.remove("device_channel_name_$idx")
+            editor.remove("device_channel_has_psk_$idx")
+            editor.remove("device_channel_secret_hex_$idx")
+            editor.remove("device_channel_hash_$idx")
+            editor.remove("channel_alias_$idx")
+            editor.remove("channel_allowed_$idx")
+            editor.remove("channel_scope_$idx")
+        }
+        for (key in prefs.all.keys) {
+            if (key.startsWith("contact_alias_")) {
+                editor.remove(key)
             }
         }
+        editor.apply()
+
+        _contacts.value = emptyList()
+        _channels.value = emptyList()
+        _manualGroupAliases.value = emptyMap()
+        pendingGroupEchoes.clear()
+    }
+
+    private fun prepareForNodeSwitch(newNodeKey: String) {
+        val persistedNodeKey = prefs.getString("last_connected_node_key", null)
+        val effectivePrevious = lastConnectedNodeKey ?: persistedNodeKey
+        if (effectivePrevious != null && effectivePrevious != newNodeKey) {
+            wipeNodeScopedData()
+        }
         lastConnectedNodeKey = newNodeKey
+        prefs.edit().putString("last_connected_node_key", newNodeKey).apply()
     }
 
     private fun initializeMeshCoreSession() {
@@ -1954,8 +1971,7 @@ class MeshCoreBleManager(private val context: Context) {
                         prefs.edit().putString("device_node_name", decoded).apply()
                         _deviceNodeName.value = decoded
                         if (previousName != null && previousName.isNotBlank() && previousName != decoded) {
-                            _contacts.value = emptyList()
-                            saveCachedContacts(emptyList())
+                            wipeNodeScopedData()
                             syncContacts()
                             syncChannelsFromDevice()
                         }
