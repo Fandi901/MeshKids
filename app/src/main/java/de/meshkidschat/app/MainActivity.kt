@@ -1180,7 +1180,7 @@ fun ParentSettingsScreen(
                                     focusedBorderColor = Color(0xFFEF6C00),
                                     unfocusedBorderColor = Color(0xFFFF9800)
                                 ),
-                                placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, nrw)") },
+                                placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, ruhrgebiet)") },
                                 singleLine = true
                             )
                             ExposedDropdownMenu(
@@ -1894,7 +1894,7 @@ fun ParentSettingsScreen(
                                                         focusedBorderColor = Color(0xFFEF6C00),
                                                         unfocusedBorderColor = Color(0xFFFF9800)
                                                     ),
-                                                    placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, nrw)") },
+                                                    placeholder = { Text("Scope eintippen oder wählen (z. B. de-nw, ruhrgebiet)") },
                                                     singleLine = true
                                                 )
                                                 ExposedDropdownMenu(
